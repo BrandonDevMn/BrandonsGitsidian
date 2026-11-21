@@ -37,7 +37,7 @@ Background research and sources: [`research.md`](research.md).
 - **Sync index**: per file, the git blob SHA recorded at the last successful sync. Used to tell "changed here" from "changed there".
 - **Blob SHA**: git's SHA-1 of `"blob <size>\0" + bytes`. Computed locally so the plugin can compare files with GitHub without downloading them.
 - **Tracked file**: a file that is synced. Excluded paths (see setup) are never tracked.
-- **Conflict copy**: a second file holding the other side's version, created instead of overwriting.
+- **Conflict log**: `_brandon-gitsidian/conflict log.md`, a synced note recording every conflict GitHub won, including the phone's discarded text.
 
 ## Writing style
 

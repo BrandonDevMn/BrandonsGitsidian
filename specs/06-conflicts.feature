@@ -1,13 +1,16 @@
 @mvp @safety
-Feature: Handle conflicts without losing anything
+Feature: Handle conflicts: GitHub wins, and it's logged
   Brandon edits on his phone while Claude edits in the repo.
-  Sometimes they'll touch the same note.
+  When both change the same thing, GitHub's version (Claude's) wins outright.
+  The phone's version is discarded, but recorded in the conflict log
+  so nothing vanishes without a trace.
 
   Background:
     Given the vault is in sync with base commit "B1"
     And "games/overseers-of-oakhaven/timeline.md" was identical everywhere at "B1"
+    And the device name is "Brandon's iPhone"
 
-  Scenario: Edits to different parts of a Markdown note are merged
+  Scenario: Edits to different parts of a Markdown note are merged, not a conflict
     Given I added a line under "## ooo s014" on the phone
     And Claude changed a line under "## ooo s003" in "B2"
     When sync runs
@@ -15,57 +18,60 @@ Feature: Handle conflicts without losing anything
     And it does a three-way line merge of base, mine and GitHub's
     And the note contains both changes
     And the merged note is pushed as a commit on top of "B2"
-    And I see "Merged your edits with GitHub's in timeline.md"
+    And nothing is written to the conflict log
 
-  Scenario: Edits to the same lines keep both versions
+  Scenario: Edits to the same lines: GitHub's version wins
     Given I changed the "open questions" list on the phone
     And Claude changed the same lines in "B2"
     When sync runs
     Then "timeline.md" in the vault holds GitHub's version
-    And my version is saved next to it as "timeline (conflict 261121-1405 Brandon's iPhone).md"
-    And the conflict copy is pushed so Claude can see it too
-    And I see a notice naming both files
+    And my version is not kept as a file anywhere in the vault
+    And no conflict copy is created
+    And an entry is added to the conflict log
+    And I see "Conflict in timeline.md: kept GitHub's version. See the conflict log."
 
-  Scenario: Binary files are never merged
+  Scenario: Binary files: GitHub's version wins
     Given both sides changed "players/chibi-sheet.jpeg"
     When sync runs
-    Then GitHub's version keeps the original name
-    And my version is saved as "chibi-sheet (conflict 261121-1405 Brandon's iPhone).jpeg"
+    Then the vault holds GitHub's version of "players/chibi-sheet.jpeg"
+    And the conflict log records that my version was discarded, without its bytes
 
-  Scenario: Edited here, deleted there
+  Scenario: Edited here, deleted there: the deletion wins
     Given I edited "players/suri.md" on the phone
     And Claude deleted it in "B2"
     When sync runs
-    Then "players/suri.md" stays in the vault with my edits
-    And it is pushed back to GitHub
-    And I see "players/suri.md was deleted on GitHub but you edited it, so it was kept"
+    Then "players/suri.md" is moved to the trash
+    And it is not pushed back to GitHub
+    And the conflict log records my discarded edits
 
-  Scenario: Deleted here, edited there
+  Scenario: Deleted here, edited there: GitHub's edit wins
     Given I deleted "players/noxen.md" on the phone
     And Claude edited it in "B2"
     When sync runs
     Then "players/noxen.md" is restored in the vault with Claude's edits
-    And I see "players/noxen.md was edited on GitHub, so it was restored"
+    And the conflict log records that my deletion was undone
 
-  Scenario: Both sides created the same new path
+  Scenario: Both sides created the same new path: GitHub's wins
     Given I created "notes/ideas.md" with content X
     And Claude created "notes/ideas.md" with content Y in "B2"
     When sync runs
     Then "notes/ideas.md" holds content Y
-    And content X is kept as "ideas (conflict 261121-1405 Brandon's iPhone).md"
+    And the conflict log records content X as discarded
 
-  Scenario: Conflict copies are easy to find and clean up
-    Given a sync produced 2 conflict copies
-    When I run the command "BrandonGitsidian: Show conflicts"
-    Then I see both conflict copies with the file each belongs to
-    And I can open either one, or delete a copy once I've resolved it
+  Scenario: What a conflict log entry contains
+    When a conflict is resolved in GitHub's favour at 2026-11-21 14:05
+    Then the entry is appended to "_brandon-gitsidian/conflict log.md"
+    And it shows the time, the device, the file path as a link, and what happened
+    And for text files it includes my discarded version inside a collapsed callout
+    And for binary files it includes only the file size
 
-  Scenario Outline: Conflict copy names
-    Given a conflict on "<path>" at 2026-11-21 14:05 on "Brandon's iPhone"
-    Then the conflict copy is named "<copy>"
+  Scenario: The conflict log is synced like any note
+    Given an entry was added to "_brandon-gitsidian/conflict log.md"
+    When the sync's push runs
+    Then the conflict log is pushed to GitHub
+    And Claude can read it to see what was overwritten
 
-    Examples:
-      | path                          | copy                                                             |
-      | timeline.md                   | timeline (conflict 261121-1405 Brandon's iPhone).md              |
-      | characters/gary severus.md    | characters/gary severus (conflict 261121-1405 Brandon's iPhone).md |
-      | players/chibi-sheet.jpeg      | players/chibi-sheet (conflict 261121-1405 Brandon's iPhone).jpeg |
+  Scenario: The conflict log stays a manageable size
+    Given the conflict log has more than 100 entries
+    When a new entry is added
+    Then the oldest entries beyond the newest 100 are removed

@@ -28,11 +28,10 @@ Feature: Work alongside Claude in the same repository
     And Claude can tell phone edits from its own in the git log
 
   @mvp
-  Scenario: Conflict copies are visible to Claude
-    Given a sync created "timeline (conflict 261121-1405 Brandon's iPhone).md"
-    Then that file is pushed to GitHub
-    And Claude can merge it and delete the copy in a later commit
-    And that deletion is pulled back to the phone like any other change
+  Scenario: Claude can see what a conflict overwrote
+    Given a sync discarded my phone edits to "timeline.md" in GitHub's favour
+    Then the entry in "_brandon-gitsidian/conflict log.md" is pushed to GitHub
+    And Claude can read my discarded text there and fold it back in if it matters
 
   @mvp
   Scenario: Claude's memory folder syncs like any other folder

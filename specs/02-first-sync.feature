@@ -32,9 +32,9 @@ Feature: First sync
     When I start the first sync
     Then I'm asked to choose how to combine them:
       | choice               | effect                                                                 |
-      | Use GitHub's version | Download everything; local files that differ are kept as conflict copies |
-      | Use this vault       | Upload everything; GitHub files that differ are kept as conflict copies |
-      | Merge both           | Identical files are linked; different ones become conflict copies     |
+      | Use GitHub's version | Download everything; local files that differ are overwritten and logged |
+      | Use this vault       | Upload everything; GitHub files that differ are overwritten in a commit |
+      | Merge both           | Identical files are linked; for different ones GitHub wins and it's logged |
     And nothing is changed until I choose
 
   Scenario: Identical files are recognised without downloading them

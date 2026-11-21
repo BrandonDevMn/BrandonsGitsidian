@@ -19,7 +19,7 @@ There is no other computer in the loop. The existing git plugins are either desk
 ## Design principles
 
 - **iOS first.** No Node.js, no Electron, no in-browser git. Everything goes through Obsidian's `requestUrl` and the GitHub REST API (Git Database endpoints), one file at a time, so memory stays bounded.
-- **Never lose a word.** Never force-push, never silently overwrite. When both sides changed a note, keep both and say so.
+- **GitHub wins, and it's logged.** Never force-push. If edits to different parts of a note can be merged, merge them. If both sides changed the same lines, GitHub's version wins and the phone's version is written to a conflict log note (`_brandon-gitsidian/conflict log.md`), never silently dropped.
 - **Boring is good.** Sync when the app opens, when it comes back to the foreground, on a timer, and on demand. iOS doesn't allow true background sync, so we don't pretend to.
 - **Readable history.** Every push is a normal git commit that a human (or Claude) can read on GitHub.
 - **Secrets stay secret.** The GitHub token lives in Obsidian's SecretStorage, never in `data.json`.
