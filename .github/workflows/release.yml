@@ -1,10 +1,12 @@
 name: Release
 
-# Push a tag equal to manifest.json's "version" (e.g. 0.1.0, no "v") to publish
-# a release that BRAT can install (specs/12-ios-platform.feature).
+# Publishes a release that BRAT can install (specs/12-ios-platform.feature).
+# Either push a tag equal to manifest.json's "version" (e.g. 0.1.0, no "v"),
+# or tap "Run workflow" on GitHub (works from the phone): it tags the manifest version itself.
 on:
   push:
     tags: ["*"]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -20,11 +22,16 @@ jobs:
       - run: npm ci
       - run: npm run coverage
       - run: npm run build
-      - name: Check tag matches manifest version
+      - name: Work out the version
+        id: v
         run: |
           v=$(node -p "require('./manifest.json').version")
-          test "$v" = "${GITHUB_REF_NAME}" || { echo "Tag ${GITHUB_REF_NAME} != manifest version $v"; exit 1; }
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            test "$v" = "$GITHUB_REF_NAME" || { echo "Tag $GITHUB_REF_NAME != manifest version $v"; exit 1; }
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
       - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes "BrandonGitsidian $GITHUB_REF_NAME" main.js manifest.json styles.css
+          V: ${{ steps.v.outputs.version }}
+        run: gh release create "$V" --target "$GITHUB_SHA" --title "$V" --notes "BrandonGitsidian $V" main.js manifest.json styles.css
