@@ -1,5 +1,5 @@
-import { apiVersion, Modal, normalizePath, Platform, Plugin, setIcon, TAbstractFile, TFile, type App } from "obsidian";
-import { CONFLICT_LOG_PATH, isExcluded } from "./core/paths";
+import { apiVersion, normalizePath, Platform, Plugin, setIcon, TAbstractFile, TFile, type App } from "obsidian";
+import { isExcluded } from "./core/paths";
 import { formatLog, Logger, type LogEntry } from "./core/logger";
 import { utf8 } from "./core/blob";
 import { GitHubClient, GitHubError } from "./github/client";
@@ -92,7 +92,6 @@ export default class BrandonGitsidianPlugin extends Plugin {
     this.addCommand({ id: "preview-sync", name: "Preview sync", callback: () => void this.preview() });
     this.addCommand({ id: "toggle-pause", name: "Pause or resume sync", callback: () => void this.togglePause() });
     this.addCommand({ id: "open-detailed-log", name: "Open detailed log", callback: () => void this.openLogView() });
-    this.addCommand({ id: "open-sync-log", name: "Open sync log", callback: () => new HistoryModal(this.app, this).open() });
     this.addCommand({ id: "save-log-to-note", name: "Save detailed log to note", callback: () => void this.saveLogNote(this.log.list()) });
 
     // obsidian://brandon-gitsidian?action=sync (iOS Shortcuts, specs/07)
@@ -449,44 +448,6 @@ export default class BrandonGitsidianPlugin extends Plugin {
   async saveAll(): Promise<void> {
     const data: PluginData = { settings: this.settings, state: this.state, log: this.log.all(), history: this.history, userDeleted: this.userDeleted };
     await this.saveData(data);
-  }
-}
-
-class HistoryModal extends Modal {
-  constructor(app: App, private plugin: BrandonGitsidianPlugin) {
-    super(app);
-  }
-  onOpen(): void {
-    this.titleEl.setText("Sync log");
-    const { contentEl } = this;
-    if (!this.plugin.history.length) contentEl.createEl("p", { text: "No syncs yet." });
-    for (const h of this.plugin.history) {
-      const box = contentEl.createDiv({ cls: "bgs-history" });
-      box.createEl("strong", { text: `${new Date(h.t).toLocaleString()} · ${h.trigger} · ${h.status}` });
-      if (h.error) box.createEl("div", { text: h.error, cls: "bgs-error" });
-      for (const c of h.commits) box.createEl("div", { text: `GitHub: "${c.message}" by ${c.author}` });
-      const files: [string, string[]][] = [["pulled", h.pulled], ["pushed", h.pushed], ["trashed", h.trashed], ["conflict", h.conflicts]];
-      for (const [label, list] of files) {
-        for (const p of list) {
-          const a = box.createEl("a", { text: `${label}: ${p}` });
-          a.addEventListener("click", () => {
-            this.close();
-            void this.app.workspace.openLinkText(p, "");
-          });
-          box.createEl("br");
-        }
-      }
-    }
-    if (this.plugin.history.length) {
-      const link = contentEl.createEl("a", { text: `Conflict log: ${CONFLICT_LOG_PATH}` });
-      link.addEventListener("click", () => {
-        this.close();
-        void this.app.workspace.openLinkText(CONFLICT_LOG_PATH, "");
-      });
-    }
-  }
-  onClose(): void {
-    this.contentEl.empty();
   }
 }
 

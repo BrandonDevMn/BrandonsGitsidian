@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { findHiddenFiles, isHiddenPath, type Listing } from "../src/core/hidden";
 import { HiddenFileIO, type PublicAdapter } from "../src/core/hiddenIO";
-import { HiddenFileRevealer, missingInternals, UNSUPPORTED_MESSAGE, type AdapterInternals, type StatLike } from "../src/core/revealer";
+import { HiddenFileRevealer, missingInternals, staysHidden, UNSUPPORTED_MESSAGE, type AdapterInternals, type StatLike } from "../src/core/revealer";
 import { isExcluded, DEFAULT_EXCLUDES } from "../src/core/paths";
 
 const skipExcluded = (p: string) => isExcluded(p, DEFAULT_EXCLUDES);
@@ -226,14 +226,25 @@ const quietLog = () => ({ info: vi.fn(), warn: vi.fn(), debug: vi.fn() });
 describe.each(["desktop", "mobile"] as const)("files/02 showing hidden files (%s)", (kind) => {
   const tree = () => new Disk({ "a.md": "A", ".gitignore": "x", ".github/workflows/release.yml": "y", ".obsidian/app.json": "{}", ".git/HEAD": "ref", ".trash/old.md": "o" });
 
-  it("shows every dot file and folder, including .obsidian, .git and .trash", async () => {
+  it("keeps .trash and everything in it hidden", async () => {
+    const disk = tree();
+    const { a, index } = fakeInternals(disk, kind);
+    const r = new HiddenFileRevealer(a, quietLog());
+    r.enable();
+    await r.scan();
+    await r.reveal(".trash/old.md");
+    expect([...index].filter((p) => p.startsWith(".trash"))).toEqual([]);
+    expect(r.shown().filter((p) => p.startsWith(".trash"))).toEqual([]);
+  });
+
+  it("shows every dot file and folder, including .obsidian and .git", async () => {
     const disk = tree();
     const { a, index } = fakeInternals(disk, kind);
     const r = new HiddenFileRevealer(a, quietLog());
     expect(r.enable()).toBe(true);
     await r.scan();
     const shown = [...index];
-    for (const p of [".gitignore", ".github", ".github/workflows", ".github/workflows/release.yml", ".obsidian", ".obsidian/app.json", ".git/HEAD", ".trash/old.md"]) {
+    for (const p of [".gitignore", ".github", ".github/workflows", ".github/workflows/release.yml", ".obsidian", ".obsidian/app.json", ".git/HEAD"]) {
       expect(shown).toContain(p);
     }
     expect(r.shown()).toContain(".git/HEAD");
@@ -312,6 +323,11 @@ describe.each(["desktop", "mobile"] as const)("files/02 showing hidden files (%s
     expect(r.active).toBe(false);
     expect(r.shown()).toEqual([]);
   });
+});
+
+describe("files/02 the trash stays hidden", () => {
+  it.each([".trash", ".trash/old idea.md", ".trash/games/x.md"])("%s stays hidden", (p) => expect(staysHidden(p)).toBe(true));
+  it.each([".trashcan", "games/.trash/x.md", ".github", ".obsidian/app.json"])("%s can be shown", (p) => expect(staysHidden(p)).toBe(false));
 });
 
 describe("files/02 failing quietly", () => {

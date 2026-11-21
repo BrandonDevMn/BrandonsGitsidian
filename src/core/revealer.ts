@@ -43,6 +43,11 @@ export interface VaultConfig {
 
 const SHOW_ALL_TYPES = "showUnsupportedFiles";
 
+/** Paths that stay hidden: the trash, so deleted notes never show up in search or backlinks (specs/files/02). */
+export function staysHidden(path: string): boolean {
+  return path === ".trash" || path.startsWith(".trash/");
+}
+
 export const UNSUPPORTED_MESSAGE = "Can't show hidden files on this Obsidian version";
 
 /** Which internals are missing; empty means the feature can run. */
@@ -100,7 +105,7 @@ export class HiddenFileRevealer {
     // eslint-disable-next-line @typescript-eslint/no-this-alias
     const self = this;
     a.reconcileDeletion = async function (this: unknown, realPath: string, path: string, ...rest: unknown[]): Promise<void> {
-      if (!self.hiding && isHiddenPath(path)) {
+      if (!self.hiding && isHiddenPath(path) && !staysHidden(path)) {
         try {
           if (await (a._exists as NonNullable<AdapterInternals["_exists"]>)((a.getFullPath as (p: string) => string)(path), path)) {
             self.revealed.add(path);
@@ -146,7 +151,7 @@ export class HiddenFileRevealer {
 
   /** Shows one path now, e.g. a dot file sync just wrote (iOS has no file watcher to notice it). */
   async reveal(path: string): Promise<void> {
-    if (!this.active || !isHiddenPath(path)) return;
+    if (!this.active || !isHiddenPath(path) || staysHidden(path)) return;
     // Its dot parent folders have to be in the vault first.
     const parts = path.split("/");
     for (let i = 1; i < parts.length; i++) {

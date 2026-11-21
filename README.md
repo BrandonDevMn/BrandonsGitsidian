@@ -11,7 +11,7 @@ This repo holds only the code. The specs, research notes and bug notes live in B
 - **Sync:** keeps the vault and one GitHub repo in step. GitHub always wins, nothing is ever asked, and it never force-pushes.
 - **Quiet:** no pop-ups unless the GitHub connection isn't working; everything else is in the detailed log.
 - **Code viewer:** code and text files (`.py`, `.js`, `.ts`, `.json`, `.yaml`, `.toml`, `.sh`, `.css`, `.html`, `.xml`, `.ini`, `.csv`, `.txt`, `.log` and common dot files) open read-only with syntax highlighting.
-- **Hidden files:** every dot file and folder shows in the file explorer, including `.obsidian`, `.git` and `.trash`. Dot files sync like any other file; `.obsidian`, `.git` and `.trash` never sync.
+- **Hidden files:** every dot file and folder shows in the file explorer, including `.obsidian` and `.git`; `.trash` stays hidden so deleted notes stay out of search. Dot files sync like any other file; `.obsidian`, `.git` and `.trash` never sync.
 
 ## Install (iPhone)
 
