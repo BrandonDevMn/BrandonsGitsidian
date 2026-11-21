@@ -20,7 +20,8 @@ Feature: Guard rails against data loss
     When sync runs
     Then nothing is deleted yet
     And I'm shown the list of files that would be deleted
-    And I can choose "Delete them" or "Keep them and re-upload"
+    And I can choose "Delete them" or "Not now"
+    And "Not now" deletes nothing and asks again on the next sync
 
   Scenario: A vault that looks wiped doesn't wipe GitHub
     Given the sync index lists 185 files

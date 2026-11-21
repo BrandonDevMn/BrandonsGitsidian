@@ -1,0 +1,18 @@
+/* BrandonGitsidian detailed log view (specs/13). Sized for an iPhone screen. */
+.bgs-log { display: flex; flex-direction: column; gap: 8px; }
+.bgs-log-controls { display: flex; gap: 8px; }
+.bgs-log-controls input { flex: 1; min-width: 0; }
+.bgs-log-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+.bgs-log-run { font-size: var(--font-ui-small); }
+.bgs-log-list { font-family: var(--font-monospace); font-size: var(--font-ui-smaller); overflow-y: auto; }
+.bgs-log-row { padding: 4px 0; border-bottom: 1px solid var(--background-modifier-border); word-break: break-word; }
+.bgs-log-time { color: var(--text-muted); margin-right: 6px; }
+.bgs-log-runlink { margin-right: 6px; cursor: pointer; }
+.bgs-error .bgs-log-msg { color: var(--text-error); }
+.bgs-warn .bgs-log-msg { color: var(--text-warning, var(--color-orange)); }
+.bgs-debug .bgs-log-msg { color: var(--text-muted); }
+.bgs-log-empty { color: var(--text-muted); padding: 12px 0; }
+.bgs-ribbon-dirty { position: relative; }
+.bgs-ribbon-dirty::after { content: ""; position: absolute; top: 2px; right: 2px; width: 6px; height: 6px; border-radius: 50%; background: var(--interactive-accent); }
+.bgs-ribbon-running svg { animation: bgs-spin 1.2s linear infinite; }
+@keyframes bgs-spin { to { transform: rotate(360deg); } }
