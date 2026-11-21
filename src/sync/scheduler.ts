@@ -105,17 +105,26 @@ export class AwayTracker {
   }
 }
 
-/** Show each kind of repeated error once (specs/10 "Errors are shown once"). */
-export class ErrorDeduper {
-  private last: string | null = null;
-  shouldNotify(kind: string | null): boolean {
-    if (kind === null) {
-      this.last = null;
-      return false;
-    }
-    if (kind === this.last) return false;
-    this.last = kind;
+/** Errors that mean the GitHub connection isn't working: the only ones that get a notice (specs/sync/10). */
+export const CONNECTION_PROBLEMS: ReadonlySet<string> = new Set(["network", "offline", "auth", "forbidden", "not-found", "branch-missing", "no-token"]);
+
+export function isConnectionProblem(kind: string): boolean {
+  return CONNECTION_PROBLEMS.has(kind);
+}
+
+/**
+ * Decides when to show a notice (specs/sync/10): only for connection problems,
+ * and only once until a sync succeeds again. Everything else goes to the log only.
+ */
+export class ConnectionAlerts {
+  private shown = false;
+  shouldNotify(kind: string): boolean {
+    if (!isConnectionProblem(kind) || this.shown) return false;
+    this.shown = true;
     return true;
+  }
+  succeeded(): void {
+    this.shown = false;
   }
 }
 
@@ -127,8 +136,8 @@ export interface Counts {
   conflicts: number;
 }
 
-/** Short notice text; null means stay quiet (specs/10). */
-export function summaryNotice(c: Counts): string | null {
+/** One-line summary for the log; null when nothing happened. */
+export function summaryLine(c: Counts): string | null {
   const fromGitHub = c.pulled + c.trashed;
   const toGitHub = c.pushed;
   if (!fromGitHub && !toGitHub && !c.conflicts && !c.merged) return null;

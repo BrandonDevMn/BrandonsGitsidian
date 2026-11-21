@@ -1,7 +1,6 @@
-import { ItemView, Notice, type WorkspaceLeaf } from "obsidian";
+import { ItemView, type WorkspaceLeaf } from "obsidian";
 import { formatLine, formatLog, type Level, type LogEntry } from "../core/logger";
 import type BrandonGitsidianPlugin from "../main";
-import { ConfirmModal } from "./settings";
 
 export const LOG_VIEW = "brandon-gitsidian-log";
 
@@ -58,14 +57,15 @@ export class LogView extends ItemView {
     });
 
     const buttons = root.createDiv({ cls: "bgs-log-buttons" });
-    buttons.createEl("button", { text: "Copy" }).addEventListener("click", () => void this.copy());
-    buttons.createEl("button", { text: "Save to note" }).addEventListener("click", () => void this.plugin.saveLogNote(this.shown()));
-    buttons.createEl("button", { text: "Clear" }).addEventListener("click", () =>
-      new ConfirmModal(this.app, "Clear the log?", "All log entries will be removed.", "Clear", () => {
-        this.plugin.log.clear();
-        void this.plugin.saveAll();
-      }).open(),
-    );
+    const copyBtn = buttons.createEl("button", { text: "Copy" });
+    copyBtn.addEventListener("click", () => void this.copy(copyBtn));
+    const saveBtn = buttons.createEl("button", { text: "Save to note" });
+    saveBtn.addEventListener("click", () => void this.plugin.saveLogNote(this.shown()).then(() => flash(saveBtn, "Saved")));
+    // No confirmation dialog (specs/sync/13): clearing is immediate.
+    buttons.createEl("button", { text: "Clear" }).addEventListener("click", () => {
+      this.plugin.log.clear();
+      void this.plugin.saveAll();
+    });
 
     this.runBar = root.createDiv({ cls: "bgs-log-run" });
     this.listEl = root.createDiv({ cls: "bgs-log-list" });
@@ -122,8 +122,15 @@ export class LogView extends ItemView {
     }
   }
 
-  private async copy(): Promise<void> {
+  private async copy(button: HTMLElement): Promise<void> {
     await navigator.clipboard.writeText(formatLog(this.shown(), this.plugin.logHeader()));
-    new Notice("Log copied");
+    flash(button, "Copied");
   }
+}
+
+/** Briefly changes a button's label instead of showing a notice (specs/sync/13). */
+function flash(button: HTMLElement, text: string): void {
+  const original = button.textContent ?? "";
+  button.setText(text);
+  window.setTimeout(() => button.setText(original), 1500);
 }

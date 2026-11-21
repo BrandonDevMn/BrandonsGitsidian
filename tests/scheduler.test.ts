@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AwayTracker, Countdown, ErrorDeduper, SingleFlight, summaryNotice } from "../src/sync/scheduler";
+import { AwayTracker, Countdown, ConnectionAlerts, SingleFlight, summaryLine } from "../src/sync/scheduler";
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
@@ -71,18 +71,28 @@ describe("07 coming back to the app", () => {
 });
 
 describe("10 notices", () => {
-  it("shows a repeated error once until it clears", () => {
-    const d = new ErrorDeduper();
-    expect(d.shouldNotify("auth")).toBe(true);
+  it("never notifies for anything but a connection problem", () => {
+    const d = new ConnectionAlerts();
+    for (const kind of ["rate-limited", "internal", "not-fast-forward", "too-big", "conflict"]) expect(d.shouldNotify(kind)).toBe(false);
+  });
+
+  it.each(["network", "offline", "auth", "forbidden", "not-found", "branch-missing", "no-token"])("notifies for the connection problem %s", (kind) => {
+    expect(new ConnectionAlerts().shouldNotify(kind)).toBe(true);
+  });
+
+  it("shows a connection problem once, until a sync succeeds in between", () => {
+    const d = new ConnectionAlerts();
+    expect(d.shouldNotify("network")).toBe(true);
+    expect(d.shouldNotify("network")).toBe(false);
     expect(d.shouldNotify("auth")).toBe(false);
-    expect(d.shouldNotify(null)).toBe(false);
+    d.succeeded();
     expect(d.shouldNotify("auth")).toBe(true);
   });
 
-  it("is quiet when nothing happened and summarises otherwise", () => {
-    expect(summaryNotice({ pulled: 0, pushed: 0, trashed: 0, merged: 0, conflicts: 0 })).toBeNull();
-    expect(summaryNotice({ pulled: 3, pushed: 1, trashed: 0, merged: 0, conflicts: 0 })).toBe("Synced: 3 from GitHub, 1 to GitHub");
-    expect(summaryNotice({ pulled: 1, pushed: 0, trashed: 0, merged: 0, conflicts: 2 })).toContain("2 conflicts: kept GitHub's version");
-    expect(summaryNotice({ pulled: 0, pushed: 0, trashed: 0, merged: 1, conflicts: 0 })).toBe("Synced: merged edits");
+  it("summarises a sync for the log, and is quiet when nothing happened", () => {
+    expect(summaryLine({ pulled: 0, pushed: 0, trashed: 0, merged: 0, conflicts: 0 })).toBeNull();
+    expect(summaryLine({ pulled: 3, pushed: 1, trashed: 0, merged: 0, conflicts: 0 })).toBe("Synced: 3 from GitHub, 1 to GitHub");
+    expect(summaryLine({ pulled: 1, pushed: 0, trashed: 0, merged: 0, conflicts: 2 })).toContain("2 conflicts: kept GitHub's version");
+    expect(summaryLine({ pulled: 0, pushed: 0, trashed: 0, merged: 1, conflicts: 0 })).toBe("Synced: merged edits");
   });
 });

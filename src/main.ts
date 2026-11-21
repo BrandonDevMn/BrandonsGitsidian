@@ -4,7 +4,7 @@ import { formatLog, Logger, type LogEntry } from "./core/logger";
 import { utf8 } from "./core/blob";
 import { GitHubClient, GitHubError } from "./github/client";
 import { friendly, SyncEngine, type SyncOptions, type SyncResult, type SyncState } from "./sync/engine";
-import { AwayTracker, Countdown, ErrorDeduper, SingleFlight, summaryNotice, type RunRequest } from "./sync/scheduler";
+import { AwayTracker, ConnectionAlerts, Countdown, SingleFlight, summaryLine, type RunRequest } from "./sync/scheduler";
 import { obsidianHttp } from "./obsidian/http";
 import { ObsidianVaultIO } from "./obsidian/vaultIO";
 import { BrandonGitsidianSettingTab, DEFAULT_SETTINGS, loadSettings, notice, type Settings } from "./obsidian/settings";
@@ -48,7 +48,7 @@ export default class BrandonGitsidianPlugin extends Plugin {
   private runner!: SingleFlight<SyncResult | null>;
   private typing!: Countdown;
   private away = new AwayTracker();
-  private errors = new ErrorDeduper();
+  private alerts = new ConnectionAlerts();
   private dirty = false;
   private lastError: string | null = null;
   private applying = false;
@@ -184,10 +184,11 @@ export default class BrandonGitsidianPlugin extends Plugin {
   async syncNow(trigger: string): Promise<void> {
     this.typing.cancel();
     if (navigator.onLine === false) {
-      notice("You're offline. Try again when you're connected.");
+      this.log.warn("Sync now: the device is offline");
+      this.reportError("offline", "You're offline. BrandonGitsidian will sync when you're connected.");
       return;
     }
-    if (this.runner.busy) notice("A sync is already running; another will follow it.");
+    if (this.runner.busy) this.log.info("A sync is already running; another will follow it");
     await this.runner.request({ trigger }, true);
   }
 
@@ -196,7 +197,6 @@ export default class BrandonGitsidianPlugin extends Plugin {
     this.runner.paused = this.settings.paused;
     this.log.info(this.settings.paused ? "Automatic sync paused" : "Automatic sync resumed");
     this.setRibbon(this.settings.paused ? "paused" : this.dirty ? "dirty" : "idle");
-    notice(this.settings.paused ? "Automatic sync paused. \"Sync now\" still works." : "Automatic sync resumed.");
     await this.saveAll();
   }
 
@@ -262,11 +262,12 @@ export default class BrandonGitsidianPlugin extends Plugin {
       }
     } else {
       this.lastError = null;
-      this.errors.shouldNotify(null);
+      if (r.status === "ok" || r.status === "nothing-to-do") this.alerts.succeeded();
       if (!this.settings.paused) this.runner.paused = false;
-      const text = summaryNotice({ pulled: r.pulled.length, pushed: r.pushed.length, trashed: r.trashed.length, merged: r.merged.length, conflicts: r.conflicts.length });
-      if (text) notice(text, () => new HistoryModal(this.app, this).open());
-      for (const s of r.skipped) if (s.reason.includes("limit")) notice(`Skipped ${s.path} (${s.reason}).`);
+      // No pop-ups for normal syncs; the outcome goes to the log only (specs/sync/10).
+      const text = summaryLine({ pulled: r.pulled.length, pushed: r.pushed.length, trashed: r.trashed.length, merged: r.merged.length, conflicts: r.conflicts.length });
+      if (text) this.log.info(text);
+      for (const s of r.skipped) this.log.warn(`Skipped ${s.path} (${s.reason})`);
     }
     if (r.status !== "skipped") {
       this.history.unshift({
@@ -287,10 +288,20 @@ export default class BrandonGitsidianPlugin extends Plugin {
     await this.saveAll();
   }
 
+  /** Errors update the ribbon and the log; only a broken GitHub connection gets a notice, once (specs/sync/10). */
   private reportError(kind: string, message: string): void {
     this.lastError = message;
     this.setRibbon("error");
-    if (this.errors.shouldNotify(kind)) notice(message, () => void this.openLogView(), 10000);
+    if (this.alerts.shouldNotify(kind)) notice(message, () => this.openSettings(), 10000);
+    else this.log.debug(`No notice for "${kind}": not a connection problem, or already shown`);
+  }
+
+  openSettings(): void {
+    // `setting` isn't in the public API types; if it's missing the notice simply does nothing on tap.
+    const setting = (this.app as unknown as { setting?: { open(): void; openTabById(id: string): void } }).setting;
+    if (!setting) return;
+    setting.open();
+    setting.openTabById(this.manifest.id);
   }
 
   private client(): GitHubClient | null {
@@ -342,7 +353,12 @@ export default class BrandonGitsidianPlugin extends Plugin {
     const engine = this.engine();
     if (!engine) return;
     const r = await engine.sync({ trigger: "preview", dryRun: true });
-    new PreviewModal(this.app, r).open();
+    // Written to the log, not shown in a pop-up (specs/sync/08).
+    if (r.error) this.log.warn(`Preview: ${r.error.message}`);
+    else if (!r.preview?.length) this.log.info("Preview: nothing to sync");
+    else for (const p of r.preview) this.log.info(`Preview: would ${p.action} ${p.path}`);
+    this.log.info("Preview finished; nothing was changed");
+    await this.openLogView();
   }
 
   // ---- state, log, UI ------------------------------------------------------------------
@@ -366,12 +382,13 @@ export default class BrandonGitsidianPlugin extends Plugin {
     return `BrandonGitsidian ${this.manifest.version} · Obsidian API ${apiVersion} · ${Platform.isIosApp ? "iOS" : Platform.isMobile ? "mobile" : "desktop"} · ${this.repoKey()}`;
   }
 
-  async saveLogNote(entries: LogEntry[], announce = true): Promise<void> {
+  async saveLogNote(entries: LogEntry[], announce = true): Promise<boolean> {
     const path = normalizePath(LOG_NOTE_PATH);
     const text = "```\n" + formatLog(entries, this.logHeader()) + "\n```\n";
     const io = new ObsidianVaultIO(this.app);
     await io.write(path, utf8.encode(text));
-    if (announce) notice(`Saved log to ${path}`);
+    if (announce) this.log.info(`Saved log to ${path}`);
+    return true;
   }
 
   async openLogView(): Promise<void> {
@@ -437,22 +454,6 @@ class HistoryModal extends Modal {
         void this.app.workspace.openLinkText(CONFLICT_LOG_PATH, "");
       });
     }
-  }
-  onClose(): void {
-    this.contentEl.empty();
-  }
-}
-
-class PreviewModal extends Modal {
-  constructor(app: App, private r: SyncResult) {
-    super(app);
-  }
-  onOpen(): void {
-    this.titleEl.setText("Sync preview");
-    if (this.r.error) this.contentEl.createEl("p", { text: this.r.error.message });
-    else if (!this.r.preview?.length) this.contentEl.createEl("p", { text: "Nothing to sync." });
-    for (const p of this.r.preview ?? []) this.contentEl.createEl("div", { text: `${p.action}: ${p.path}` });
-    this.contentEl.createEl("p", { text: "Nothing was changed.", cls: "bgs-log-empty" });
   }
   onClose(): void {
     this.contentEl.empty();

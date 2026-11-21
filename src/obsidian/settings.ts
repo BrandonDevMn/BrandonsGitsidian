@@ -1,4 +1,4 @@
-import { App, Modal, Notice, PluginSettingTab, SecretComponent, Setting } from "obsidian";
+import { App, Notice, PluginSettingTab, SecretComponent, Setting } from "obsidian";
 import { CHOSEN_SETTINGS, DEFAULT_SETTINGS, loadSettings, type Settings } from "../core/settings";
 
 export { DEFAULT_SETTINGS, loadSettings, CHOSEN_SETTINGS, type Settings };
@@ -92,27 +92,7 @@ export class BrandonGitsidianSettingTab extends PluginSettingTab {
 }
 
 /** Yes/no confirmation; only used for clearing the log (never for sync decisions). */
-export class ConfirmModal extends Modal {
-  constructor(app: App, private heading: string, private body: string, private cta: string, private onYes: () => void) {
-    super(app);
-  }
-  onOpen(): void {
-    this.titleEl.setText(this.heading);
-    this.contentEl.createEl("p", { text: this.body });
-    new Setting(this.contentEl)
-      .addButton((b) => b.setButtonText("Cancel").onClick(() => this.close()))
-      .addButton((b) =>
-        b.setButtonText(this.cta).setWarning().onClick(() => {
-          this.close();
-          this.onYes();
-        }),
-      );
-  }
-  onClose(): void {
-    this.contentEl.empty();
-  }
-}
-
+/** The plugin's only pop-up, used just for GitHub connection problems (specs/sync/10). */
 export function notice(text: string, onClick?: () => void, timeoutMs = 6000): void {
   const n = new Notice(text, timeoutMs);
   if (onClick) n.messageEl.addEventListener("click", onClick);
