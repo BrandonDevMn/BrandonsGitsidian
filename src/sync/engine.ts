@@ -39,27 +39,16 @@ export interface SyncState {
   index: Record<string, IndexEntry>;
 }
 
-export type FirstSyncChoice = "github" | "vault" | "merge";
-
 export interface SyncOptions {
   trigger: string;
   pushOnly?: boolean; // quick push when the app is hidden (specs/07)
   dryRun?: boolean; // preview (specs/08)
-  firstSyncChoice?: FirstSyncChoice;
-  confirmMassDeletion?: boolean;
-  restoreWipedVault?: boolean;
+  /** Paths deleted or renamed away in Obsidian since the last sync. Only these may be deleted on GitHub (specs/08). */
+  userDeleted?: string[];
 }
 
-export type Decision =
-  | { kind: "first-sync" }
-  | { kind: "mass-deletion"; paths: string[] }
-  | { kind: "vault-wiped" }
-  | { kind: "history-rewritten" }
-  | { kind: "branch-missing" };
-
 export interface SyncResult {
-  status: "ok" | "nothing-to-do" | "needs-decision" | "error" | "skipped";
-  decision?: Decision;
+  status: "ok" | "nothing-to-do" | "error" | "skipped";
   error?: { kind: string; message: string };
   pulled: string[];
   pushed: string[];
@@ -109,7 +98,7 @@ export class SyncEngine {
       try {
         const r = await this.once(opts);
         this.log.info(
-          `Sync finished: ${r.status}${r.decision ? ` (${r.decision.kind})` : ""}; pulled ${r.pulled.length}, pushed ${r.pushed.length}, trashed ${r.trashed.length}, merged ${r.merged.length}, conflicts ${r.conflicts.length}, skipped ${r.skipped.length}; took ${Date.now() - started} ms`,
+          `Sync finished: ${r.status}; pulled ${r.pulled.length}, pushed ${r.pushed.length}, trashed ${r.trashed.length}, merged ${r.merged.length}, conflicts ${r.conflicts.length}, skipped ${r.skipped.length}; took ${Date.now() - started} ms`,
         );
         return r;
       } catch (e) {
@@ -144,7 +133,7 @@ export class SyncEngine {
     const head = await this.gh.branchHead(this.cfg.branch);
     if (head === null) {
       this.log.error(`Branch "${this.cfg.branch}" not found on GitHub`);
-      return { ...result, status: "needs-decision", decision: { kind: "branch-missing" } };
+      return { ...result, status: "error", error: { kind: "branch-missing", message: `Branch "${this.cfg.branch}" not found on GitHub.` } };
     }
     const remoteEmpty = head === "empty";
     this.log.info(`Remote head: ${remoteEmpty ? "(empty repository)" : short(head)}; base: ${state.baseCommit ? short(state.baseCommit) : "(none, first sync)"}`);
@@ -191,6 +180,7 @@ export class SyncEngine {
     // ---- remote snapshot ---------------------------------------------------
     const remote = new Map<string, string>();
     let remoteTree: string | null = null;
+    let rewritten = false;
     t0 = Date.now();
     this.log.info("Step 3/5: reading GitHub's files");
     if (remoteEmpty) {
@@ -201,8 +191,8 @@ export class SyncEngine {
         this.log.info(`GitHub hasn't changed since the last sync (${short(head)}), so its file list was reused`);
       } else {
         if (state.baseCommit && !(await this.gh.isAncestor(state.baseCommit, head))) {
-          this.log.error("GitHub's history no longer contains the last synced commit");
-          return { ...result, status: "needs-decision", decision: { kind: "history-rewritten" } };
+          this.log.warn("GitHub's history changed (the last synced commit is gone); starting fresh as a first sync where GitHub wins");
+          rewritten = true;
         }
         remoteTree = await this.gh.commitTree(head);
         for (const e of await this.gh.listTree(remoteTree)) {
@@ -221,7 +211,7 @@ export class SyncEngine {
           remote.set(e.path, e.sha);
         }
         this.log.info(`GitHub: ${remote.size} files at ${short(head)} (${Date.now() - t0} ms)`);
-        if (state.baseCommit) {
+        if (state.baseCommit && !rewritten) {
           try {
             result.remoteCommits = (await this.gh.commitsBetween(state.baseCommit, head)).map((c) => ({
               message: c.message.split("\n")[0] ?? "",
@@ -237,22 +227,19 @@ export class SyncEngine {
 
     // ---- base snapshot -----------------------------------------------------
     const base = new Map<string, string>();
-    const firstSync = state.baseCommit === null;
+    const firstSync = state.baseCommit === null || rewritten;
     const conflictEntries: ConflictEntry[] = [];
     if (firstSync) {
       if (local.size > 0 && remote.size > 0) {
-        if (!opts.firstSyncChoice) {
-          this.log.info("First sync with files on both sides; waiting for a choice");
-          return { ...result, status: "needs-decision", decision: { kind: "first-sync" } };
-        }
-        this.log.info(`First sync choice: ${opts.firstSyncChoice}`);
+        // No shared history: GitHub wins every file that differs; the phone's copy is logged (specs/02).
+        let differing = 0;
         for (const [p, l] of local) {
           const r = remote.get(p);
           if (r === undefined || r === l) continue;
-          if (opts.firstSyncChoice === "github") base.set(p, l); // remote differs -> pull update (logged below)
-          if (opts.firstSyncChoice === "vault") base.set(p, r); // local differs -> push update
-          // "merge": no base -> both-added conflict -> GitHub wins, logged
+          base.set(p, l); // local == base, remote differs -> pull update (logged below)
+          differing++;
         }
+        this.log.info(`First sync with files on both sides: GitHub wins the ${differing} that differ; files only on the phone are uploaded`);
       }
     } else {
       for (const [p, e] of Object.entries(state.index)) base.set(p, e.sha);
@@ -263,18 +250,20 @@ export class SyncEngine {
       remote.delete(p);
     }
 
-    // ---- safety: wiped vault -----------------------------------------------
-    if (!firstSync && vaultLooksWiped(base.size, local.size)) {
-      if (!opts.restoreWipedVault) {
-        this.log.error("Vault looks empty but the index lists files; nothing will be deleted on GitHub");
-        return { ...result, status: "needs-decision", decision: { kind: "vault-wiped" } };
-      }
-      this.log.warn("Restoring a wiped vault from GitHub");
-      base.clear();
-    }
-
     // ---- classify ----------------------------------------------------------
     const actions = classifyAll({ base, local, remote });
+
+    // ---- safety: only delete on GitHub what Brandon deleted in Obsidian (specs/08) ----
+    const userDeleted = new Set(opts.userDeleted ?? []);
+    let restored = 0;
+    for (const [p, a] of actions) {
+      if (a.kind === "push" && a.change === "delete" && !userDeleted.has(p)) {
+        actions.set(p, { kind: "pull", change: "add" });
+        restored++;
+        this.log.info(`Restoring ${p}: it's missing from the vault but wasn't deleted in Obsidian, so GitHub's copy wins`);
+      }
+    }
+    if (restored && vaultLooksWiped(base.size, local.size)) this.log.warn(`The vault looks empty; restoring ${restored} files from GitHub`);
     this.log.info(`Step 4/5: planning — ${planSummary(actions)}`);
     const changed = [...actions].filter(([, a]) => a.kind !== "unchanged");
     for (const [p, a] of changed) {
@@ -288,11 +277,10 @@ export class SyncEngine {
       return { ...result, status: result.preview.length ? "ok" : "nothing-to-do" };
     }
 
-    // ---- safety: mass deletion ---------------------------------------------
+    // ---- big deletions are applied without asking, but called out (specs/08) ----
     const deletions = [...actions].filter(([, a]) => (a.kind === "push" || a.kind === "pull") && a.change === "delete").map(([p]) => p);
-    if (isMassDeletion(deletions.length, Math.max(base.size, local.size)) && !opts.confirmMassDeletion) {
-      this.log.warn(`Sync would delete ${deletions.length} files; asking first`);
-      return { ...result, status: "needs-decision", decision: { kind: "mass-deletion", paths: deletions } };
+    if (isMassDeletion(deletions.length, Math.max(base.size, local.size))) {
+      this.log.warn(`This sync deletes ${deletions.length} files (deleted files go to the trash on the phone)`);
     }
 
     // ---- apply pulls and conflicts -----------------------------------------
@@ -321,14 +309,13 @@ export class SyncEngine {
             result.trashed.push(path);
             this.log.info(`Pulling ${pullN}/${pullTotal}: moved ${path} to the trash (deleted on GitHub)`);
           } else {
+            // Capture the phone's copy before it's overwritten, so the conflict log keeps it (specs/02, 06).
+            if (firstSync && base.has(path)) conflictEntries.push(await this.entry(path, "edit discarded", localSha, now()));
             const bytes = await this.gh.getBlob(remoteSha as string);
             const st = await this.vault.write(path, bytes);
             nextIndex.set(path, { sha: remoteSha as string, size: st.size, mtime: st.mtime });
             result.pulled.push(path);
             this.log.info(`Pulling ${pullN}/${pullTotal}: ${path} (${a.change === "add" ? "new" : "updated"}, ${kb(bytes.byteLength)})`);
-            if (firstSync && opts.firstSyncChoice === "github" && base.has(path)) {
-              conflictEntries.push(await this.entry(path, "edit discarded", localSha, now()));
-            }
           }
           break;
         }
@@ -363,6 +350,9 @@ export class SyncEngine {
     // ---- push ----------------------------------------------------------------
     let newHead = remoteEmpty ? null : head;
     const uniquePush = dedupe(toPush);
+    // Record what was pulled before pushing: if the push fails, the next sync
+    // must not mistake these files for phone edits (bug: false conflicts, runs #11-#12).
+    if (!remoteEmpty && !opts.pushOnly && (pullTotal || firstSync)) await this.saveProgress(head, nextIndex, uniquePush, remote, state.repoKey);
     if (pullTotal) this.log.info(`Applied ${pullTotal} change${pullTotal === 1 ? "" : "s"} from GitHub (${Date.now() - t0} ms)`);
     if (uniquePush.length) {
       t0 = Date.now();
