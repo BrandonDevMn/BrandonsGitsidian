@@ -177,3 +177,16 @@ describe("detailed log (10)", () => {
     expect(changes).toBe(1);
   });
 });
+
+describe("01 settings: only the repo and token are chosen", () => {
+  it("ignores old saved values for everything except owner, repo, branch, token and pause", async () => {
+    const { loadSettings, DEFAULT_SETTINGS } = await import("../src/core/settings");
+    const s = loadSettings({ owner: "BrandonDevMn", repo: "Claudian", branch: "main", tokenSecretId: "gh", paused: true, intervalMinutes: 99, excludes: ["x/"], deviceName: "Old", logDebug: false });
+    expect(s).toMatchObject({ owner: "BrandonDevMn", repo: "Claudian", branch: "main", tokenSecretId: "gh", paused: true });
+    expect(s.intervalMinutes).toBe(DEFAULT_SETTINGS.intervalMinutes);
+    expect(s.excludes).toEqual([".obsidian/", ".trash/", ".git/"]);
+    expect(s.deviceName).toBe("Brandon's iPhone");
+    expect(s.logDebug).toBe(true);
+    expect(loadSettings(undefined)).toEqual(DEFAULT_SETTINGS);
+  });
+});

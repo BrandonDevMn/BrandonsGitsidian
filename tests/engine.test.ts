@@ -63,47 +63,39 @@ describe("02 first sync", () => {
     expect(t.gh.headMessage()).toBe(`BrandonGitsidian: initial upload from ${DEVICE}`);
   });
 
-  it("asks how to combine when both sides have files", async () => {
+  it("both sides have files: never asks, GitHub wins and the phone's version is logged (specs/02)", async () => {
     const t = setup();
     t.gh.commitFiles("main", { "timeline.md": "remote" });
     t.vault.set("timeline.md", "local");
     const r = await t.sync();
-    expect(r).toMatchObject({ status: "needs-decision", decision: { kind: "first-sync" } });
-    expect(t.vault.text("timeline.md")).toBe("local");
-    expect(t.saves).toHaveLength(0);
+    expect(r.status).toBe("ok");
+    expect(t.vault.text("timeline.md")).toBe("remote");
+    expect(t.vault.text(CONFLICT_LOG_PATH)).toContain("> local");
   });
 
-  it("merge: identical files link without transfer, differences go GitHub's way and are logged", async () => {
+  it("identical files link without transfer; one-sided files go across; differences go GitHub's way", async () => {
     const t = setup();
     t.gh.commitFiles("main", { "same.md": "S", "diff.md": "remote", "remote-only.md": "R" });
     t.vault.set("same.md", "S");
     t.vault.set("diff.md", "local");
     t.vault.set("local-only.md", "L");
     const before = t.gh.requests.length;
-    const r = await t.sync({ firstSyncChoice: "merge" });
-    expect(r.pulled).toContain("remote-only.md");
+    const r = await t.sync();
+    expect(r.pulled.sort()).toEqual(["diff.md", "remote-only.md"]);
     expect(r.pushed).toContain("local-only.md");
-    expect(r.conflicts).toEqual(["diff.md"]);
     expect(t.vault.text("diff.md")).toBe("remote");
     expect(t.vault.text(CONFLICT_LOG_PATH)).toContain("> local");
     expect(t.gh.requests.slice(before).some((q) => q.url.includes("same.md"))).toBe(false);
   });
 
-  it("vault choice uploads local versions over GitHub's", async () => {
-    const t = setup();
-    t.gh.commitFiles("main", { "diff.md": "remote", "remote-only.md": "R" });
-    t.vault.set("diff.md", "local");
-    await t.sync({ firstSyncChoice: "vault" });
-    expect(t.gh.files()["diff.md"]).toBe("local");
-    expect(t.vault.text("remote-only.md")).toBe("R");
-  });
 
-  it("github choice downloads GitHub's versions and logs what was overwritten", async () => {
+
+  it("logs what GitHub's versions overwrote on the first sync", async () => {
     const t = setup();
     t.gh.commitFiles("main", { "diff.md": "remote" });
     t.vault.set("diff.md", "local");
     t.vault.set("mine.md", "M");
-    await t.sync({ firstSyncChoice: "github" });
+    await t.sync();
     expect(t.vault.text("diff.md")).toBe("remote");
     expect(t.gh.files()["mine.md"]).toBe("M");
     expect(t.vault.text(CONFLICT_LOG_PATH)).toContain("[[diff]]");
@@ -113,7 +105,7 @@ describe("02 first sync", () => {
     const t = setup();
     t.gh.commitFiles("main", { "a.md": "A", "b.md": "B" });
     t.vault.set("a.md", "A"); // pretend this one landed before iOS suspended us
-    const r = await t.sync({ firstSyncChoice: "merge" });
+    const r = await t.sync();
     expect(r.pulled).toEqual(["b.md"]);
   });
 });
@@ -134,12 +126,12 @@ describe("03 change detection", () => {
     expect((await t.sync()).status).toBe("nothing-to-do");
   });
 
-  it("a rename is a delete plus an add in one commit", async () => {
+  it("a rename in Obsidian is a delete plus an add in one commit", async () => {
     const t = await synced({ "characters/severus glass-staff.md": "boss" });
     t.vault.delete("characters/severus glass-staff.md");
     t.vault.set("characters/gary severus.md", "boss");
     const commits = t.gh.commits.size;
-    await t.sync();
+    await t.sync({ userDeleted: ["characters/severus glass-staff.md"] });
     expect(t.gh.commits.size).toBe(commits + 1);
     expect(t.gh.files()).toEqual({ "characters/gary severus.md": "boss" });
   });
@@ -191,7 +183,7 @@ describe("05 push", () => {
     t.vault.set("timeline.md", "t2");
     t.vault.set("wren stonehill.md", "w");
     t.vault.delete("old idea.md");
-    const r = await t.sync();
+    const r = await t.sync({ userDeleted: ["old idea.md"] });
     expect(r.pushed.sort()).toEqual(["old idea.md", "timeline.md", "wren stonehill.md"]);
     expect(t.gh.files()).toEqual({ "timeline.md": "t2", "wren stonehill.md": "w" });
     expect(t.gh.headMessage()).toBe(
@@ -316,7 +308,7 @@ describe("08 safety", () => {
     expect(t.gh.files()["brand new.md"]).toBe("N");
   });
 
-  it("asks before mass deletions and does nothing meanwhile", async () => {
+  it("applies big deletions from GitHub without asking, and warns in the log (specs/08)", async () => {
     const files: Record<string, string> = {};
     for (let i = 0; i < 30; i++) files[`n${i}.md`] = `${i}`;
     const t = await synced(files);
@@ -324,20 +316,19 @@ describe("08 safety", () => {
     for (let i = 0; i < 26; i++) del[`n${i}.md`] = null;
     t.gh.commitFiles("main", del);
     const r = await t.sync();
-    expect(r.decision?.kind).toBe("mass-deletion");
-    expect(t.vault.trashed).toEqual([]);
-    const r2 = await t.sync({ confirmMassDeletion: true });
-    expect(r2.trashed).toHaveLength(26);
+    expect(r.status).toBe("ok");
+    expect(r.trashed).toHaveLength(26);
+    expect(t.log.list("warn").some((e) => e.msg.includes("deletes 26 files"))).toBe(true);
   });
 
-  it("a wiped vault doesn't wipe GitHub, and can be restored", async () => {
+  it("a wiped vault doesn't wipe GitHub; it's restored without asking (specs/08)", async () => {
     const t = await synced({ "a.md": "A", "b.md": "B" });
     t.vault.files.clear();
     const r = await t.sync();
-    expect(r.decision?.kind).toBe("vault-wiped");
+    expect(r.status).toBe("ok");
     expect(Object.keys(t.gh.files())).toHaveLength(2);
-    await t.sync({ restoreWipedVault: true });
     expect(t.vault.text("a.md")).toBe("A");
+    expect(t.vault.text("b.md")).toBe("B");
   });
 
   it("an interrupted pull keeps the old base and resumes cleanly", async () => {
@@ -371,7 +362,7 @@ describe("09 limits and errors", () => {
     const t = setup({ maxFileBytes: 10 });
     t.gh.commitFiles("main", { "small.md": "s", "big-remote.png": "x".repeat(50) });
     t.vault.set("big-local.png", "y".repeat(50));
-    const r = await t.sync({ firstSyncChoice: "merge" });
+    const r = await t.sync();
     expect(r.skipped.map((s) => s.path).sort()).toEqual(["big-local.png", "big-remote.png"]);
     expect(t.vault.files.has("big-remote.png")).toBe(false);
     expect(t.gh.files()["big-local.png"]).toBeUndefined();
@@ -394,20 +385,22 @@ describe("09 limits and errors", () => {
     expect(t.gh.files()["a.md"]).toBe("A");
   });
 
-  it("a rewritten history needs a decision", async () => {
+  it("a rewritten history starts fresh as a first sync where GitHub wins (specs/09)", async () => {
     const t = await synced({ "a.md": "A" });
     t.gh.refs.clear();
     t.gh.commitFiles("main", { "a.md": "fresh start" });
     const r = await t.sync();
-    expect(r.decision?.kind).toBe("history-rewritten");
+    expect(r.status).toBe("ok");
+    expect(t.vault.text("a.md")).toBe("fresh start");
+    expect(t.log.list("warn").some((e) => e.msg.includes("history changed"))).toBe(true);
   });
 
-  it("a missing branch is reported", async () => {
+  it("a missing branch is reported as an error, not a question", async () => {
     const t = await synced({ "a.md": "A" });
     t.gh.refs.set("dev", t.gh.refs.get("main")!);
     t.gh.refs.delete("main");
     const r = await t.sync();
-    expect(r.decision?.kind).toBe("branch-missing");
+    expect(r).toMatchObject({ status: "error", error: { kind: "branch-missing" } });
   });
 
   it("network failures stop without moving the base", async () => {

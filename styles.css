@@ -16,3 +16,19 @@
 .bgs-ribbon-dirty::after { content: ""; position: absolute; top: 2px; right: 2px; width: 6px; height: 6px; border-radius: 50%; background: var(--interactive-accent); }
 .bgs-ribbon-running svg { animation: bgs-spin 1.2s linear infinite; }
 @keyframes bgs-spin { to { transform: rotate(360deg); } }
+
+/* settings: explanation block and GitHub link (specs/01) */
+.bgs-about {
+  padding: 0.25em 0 0.75em;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+.bgs-about p {
+  margin: 0 0 0.75em;
+}
+.bgs-footer {
+  margin-top: 2em;
+  padding-top: 1em;
+  border-top: 1px solid var(--background-modifier-border);
+  text-align: center;
+}

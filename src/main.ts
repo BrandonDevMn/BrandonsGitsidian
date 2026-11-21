@@ -3,11 +3,11 @@ import { CONFLICT_LOG_PATH, isExcluded } from "./core/paths";
 import { formatLog, Logger, type LogEntry } from "./core/logger";
 import { utf8 } from "./core/blob";
 import { GitHubClient, GitHubError } from "./github/client";
-import { friendly, SyncEngine, type FirstSyncChoice, type SyncOptions, type SyncResult, type SyncState } from "./sync/engine";
+import { friendly, SyncEngine, type SyncOptions, type SyncResult, type SyncState } from "./sync/engine";
 import { AwayTracker, Countdown, ErrorDeduper, SingleFlight, summaryNotice, type RunRequest } from "./sync/scheduler";
 import { obsidianHttp } from "./obsidian/http";
 import { ObsidianVaultIO } from "./obsidian/vaultIO";
-import { BrandonGitsidianSettingTab, choose, DEFAULT_SETTINGS, notice, type Settings } from "./obsidian/settings";
+import { BrandonGitsidianSettingTab, DEFAULT_SETTINGS, loadSettings, notice, type Settings } from "./obsidian/settings";
 import { LOG_VIEW, LogView } from "./obsidian/logView";
 
 const LOG_NOTE_PATH = "_brandon-gitsidian/detailed log.md";
@@ -31,6 +31,8 @@ interface PluginData {
   state: SyncState;
   log: LogEntry[];
   history: HistoryItem[];
+  /** Paths deleted or renamed away in Obsidian since the last sync (specs/08). */
+  userDeleted: string[];
 }
 
 type RibbonState = "idle" | "running" | "dirty" | "error" | "paused";
@@ -39,6 +41,7 @@ export default class BrandonGitsidianPlugin extends Plugin {
   settings: Settings = { ...DEFAULT_SETTINGS };
   state: SyncState = { repoKey: "", baseCommit: null, index: {} };
   history: HistoryItem[] = [];
+  userDeleted: string[] = [];
   log!: Logger;
 
   private ribbon!: HTMLElement;
@@ -55,7 +58,8 @@ export default class BrandonGitsidianPlugin extends Plugin {
 
   async onload(): Promise<void> {
     const data = ((await this.loadData()) ?? {}) as Partial<PluginData>;
-    this.settings = { ...DEFAULT_SETTINGS, ...(data.settings ?? {}) };
+    this.settings = loadSettings(data.settings); // only the repo + token are Brandon's choice (specs/01)
+    this.userDeleted = data.userDeleted ?? [];
     this.state = data.state ?? { repoKey: this.repoKey(), baseCommit: null, index: {} };
     this.history = data.history ?? [];
     this.log = new Logger(data.log ?? []);
@@ -95,8 +99,18 @@ export default class BrandonGitsidianPlugin extends Plugin {
       const onChange = (f: TAbstractFile) => this.onVaultChange(f);
       this.registerEvent(this.app.vault.on("modify", onChange));
       this.registerEvent(this.app.vault.on("create", onChange));
-      this.registerEvent(this.app.vault.on("delete", onChange));
-      this.registerEvent(this.app.vault.on("rename", onChange));
+      this.registerEvent(
+        this.app.vault.on("delete", (f) => {
+          this.noteUserDelete(f, f.path);
+          onChange(f);
+        }),
+      );
+      this.registerEvent(
+        this.app.vault.on("rename", (f, oldPath) => {
+          this.noteUserDelete(f, oldPath);
+          onChange(f);
+        }),
+      );
       if (this.settings.syncOnStartup) void this.runner.request({ trigger: "startup" });
     });
 
@@ -127,6 +141,15 @@ export default class BrandonGitsidianPlugin extends Plugin {
     } else {
       this.log.debug(`Edit detected in ${f.path}; will sync on the next trigger`);
     }
+  }
+
+  /** Only deletions Brandon makes in Obsidian may delete files on GitHub; anything else that goes missing is restored (specs/08). */
+  private noteUserDelete(f: TAbstractFile, path: string): void {
+    if (this.applying || !(f instanceof TFile)) return;
+    if (isExcluded(path, this.settings.excludes) || path === LOG_NOTE_PATH) return;
+    if (!this.userDeleted.includes(path)) this.userDeleted.push(path);
+    this.log.info(`You deleted or renamed ${path} in Obsidian; it will be deleted on GitHub at the next sync`);
+    void this.saveAll();
   }
 
   private onVisibility(): void {
@@ -201,15 +224,11 @@ export default class BrandonGitsidianPlugin extends Plugin {
     );
   }
 
-  private async runSync(req: RunRequest, extra: Partial<SyncOptions> = {}): Promise<SyncResult | null> {
+  private async runSync(req: RunRequest): Promise<SyncResult | null> {
     if (this.state.baseCommit && this.state.repoKey !== this.repoKey()) {
-      const ok = await choose(
-        this.app,
-        "Repository changed",
-        `You're now syncing ${this.repoKey()}. The next sync will be treated as a first sync.`,
-        [{ label: "Start fresh with the new repository", value: "yes" }],
-      );
-      if (!ok) return null;
+      // Never ask: a different repo just means a fresh first sync where GitHub wins (specs/01).
+      this.log.warn(`Repository changed from ${this.state.repoKey} to ${this.repoKey()}; starting fresh with a first sync`);
+      this.userDeleted = [];
       await this.resetSyncState();
     }
     const engine = this.engine();
@@ -218,63 +237,19 @@ export default class BrandonGitsidianPlugin extends Plugin {
     this.setRibbon("running");
     this.applying = true;
     this.dirty = false;
+    const deleted = [...this.userDeleted];
     let result: SyncResult;
     try {
-      result = await engine.sync({ trigger: req.trigger, pushOnly: req.pushOnly, ...extra });
+      result = await engine.sync({ trigger: req.trigger, pushOnly: req.pushOnly, userDeleted: deleted });
     } finally {
       this.applying = false;
     }
-
-    if (result.status === "needs-decision" && result.decision) {
-      const next = await this.decide(result);
-      if (next) return this.runSync(req, { ...extra, ...next });
+    if (result.status === "ok" || result.status === "nothing-to-do") {
+      this.userDeleted = this.userDeleted.filter((p) => !deleted.includes(p)); // sent (or no longer relevant)
     }
     if (result.status === "skipped" && req.pushOnly) this.dirty = true;
     await this.afterSync(req, result);
     return result;
-  }
-
-  private async decide(result: SyncResult): Promise<Partial<SyncOptions> | null> {
-    const d = result.decision!;
-    this.setRibbon("idle");
-    switch (d.kind) {
-      case "first-sync":
-      case "history-rewritten": {
-        const choice = await choose(
-          this.app,
-          d.kind === "first-sync" ? "First sync" : "GitHub's history changed",
-          "Your vault and GitHub both have notes. How should they be combined? Nothing changes until you choose.",
-          [
-            { label: "Merge both", value: "merge", desc: "Identical files are linked. Where they differ, GitHub's version wins and yours is logged." },
-            { label: "Use GitHub's version", value: "github", desc: "Download everything; differing local files are overwritten and logged." },
-            { label: "Use this vault", value: "vault", desc: "Upload everything; differing GitHub files are overwritten in a commit." },
-          ],
-        );
-        if (!choice) return null;
-        if (d.kind === "history-rewritten") await this.resetSyncState();
-        return { firstSyncChoice: choice as FirstSyncChoice };
-      }
-      case "mass-deletion": {
-        const preview = d.paths.slice(0, 15).join("\n") + (d.paths.length > 15 ? `\n…and ${d.paths.length - 15} more` : "");
-        const ok = await choose(this.app, `Delete ${d.paths.length} files?`, `This sync would delete:\n${preview}`, [
-          { label: "Delete them", value: "yes" },
-          { label: "Not now", value: "no", desc: "Nothing is deleted. You'll be asked again on the next sync." },
-        ]);
-        return ok === "yes" ? { confirmMassDeletion: true } : null;
-      }
-      case "vault-wiped": {
-        const ok = await choose(
-          this.app,
-          "Your vault looks empty",
-          "Nothing was deleted on GitHub. Restore your notes from GitHub?",
-          [{ label: "Restore from GitHub", value: "yes" }],
-        );
-        return ok ? { restoreWipedVault: true } : null;
-      }
-      case "branch-missing":
-        this.reportError("branch-missing", `Branch "${this.settings.branch}" not found. Pick an existing branch, or leave the repo empty.`);
-        return null;
-    }
   }
 
   private async afterSync(req: RunRequest, r: SyncResult): Promise<void> {
@@ -297,7 +272,7 @@ export default class BrandonGitsidianPlugin extends Plugin {
       this.history.unshift({
         t: Date.now(),
         trigger: req.trigger,
-        status: r.decision ? `${r.status} (${r.decision.kind})` : r.status,
+        status: r.status,
         error: r.error?.message,
         pulled: r.pulled,
         pushed: r.pushed,
@@ -318,30 +293,48 @@ export default class BrandonGitsidianPlugin extends Plugin {
     if (this.errors.shouldNotify(kind)) notice(message, () => void this.openLogView(), 10000);
   }
 
-  async testConnection(): Promise<void> {
+  private client(): GitHubClient | null {
     const s = this.settings;
     const token = s.tokenSecretId ? this.app.secretStorage.getSecret(s.tokenSecretId) : null;
-    if (!token) return notice("Pick a GitHub token in settings first.");
-    if (navigator.onLine === false) return notice("You're offline. Try again when you're connected.");
-    const client = new GitHubClient({ owner: s.owner, repo: s.repo, token, http: obsidianHttp, log: this.log });
+    return token ? new GitHubClient({ owner: s.owner, repo: s.repo, token, http: obsidianHttp, log: this.log }) : null;
+  }
+
+  /** Repositories the token can push to, or null if there's no token or GitHub can't be reached. */
+  async listRepos(): Promise<{ owner: string; repo: string; defaultBranch: string; isPrivate: boolean }[] | null> {
+    const client = this.client();
+    if (!client) return null;
+    try {
+      return await client.listRepos();
+    } catch (e) {
+      this.log.error(`Couldn't list repositories: ${e instanceof GitHubError ? friendly(e) : (e as Error).message}`);
+      return null;
+    }
+  }
+
+  /** Checks the chosen repo and token; returns a sentence for the settings screen (specs/01). */
+  async checkConnection(): Promise<string> {
+    const s = this.settings;
+    const client = this.client();
+    if (!client) return "Pick a GitHub token in settings first.";
+    if (navigator.onLine === false) return "You're offline. Try again when you're connected.";
     try {
       const info = await client.repoInfo();
-      if (!info.canPush) return notice('This token is read-only. Give it "Contents: Read and write" access.');
+      if (!info.canPush) return 'This token is read-only. Give it "Contents: Read and write" access.';
       const head = await client.branchHead(s.branch);
-      if (head === null) return notice(`Branch "${s.branch}" not found. Pick an existing branch or leave the repo empty.`);
-      notice(`Connected to ${s.owner}/${s.repo} (${s.branch}). ${client.rate.remaining ?? "?"} API requests left this hour.`);
-      this.log.info(`Test connection OK${head === "empty" ? " (repository is empty)" : ""}`);
+      if (head === null) return `Branch "${s.branch}" not found on GitHub.`;
+      this.log.info(`Connection OK: ${s.owner}/${s.repo} (${s.branch})${head === "empty" ? ", repository is empty" : ""}`);
+      return `Connected to ${s.owner}/${s.repo} (${s.branch}). ${client.rate.remaining ?? "?"} API requests left this hour.`;
     } catch (e) {
       const msg =
         e instanceof GitHubError
           ? e.kind === "auth"
             ? "GitHub didn't accept this token. Create a new one and try again."
             : e.kind === "not-found"
-              ? `Can't see ${s.owner}/${s.repo}. Check the name and the token's repo access.`
+              ? `Can't see ${s.owner}/${s.repo}. Check the token's repo access.`
               : friendly(e)
           : (e as Error).message;
-      this.log.error(`Test connection failed: ${msg}`);
-      notice(msg);
+      this.log.error(`Connection check failed: ${msg}`);
+      return msg;
     }
   }
 
@@ -407,7 +400,7 @@ export default class BrandonGitsidianPlugin extends Plugin {
   }
 
   async saveAll(): Promise<void> {
-    const data: PluginData = { settings: this.settings, state: this.state, log: this.log.all(), history: this.history };
+    const data: PluginData = { settings: this.settings, state: this.state, log: this.log.all(), history: this.history, userDeleted: this.userDeleted };
     await this.saveData(data);
   }
 }
@@ -457,7 +450,6 @@ class PreviewModal extends Modal {
   onOpen(): void {
     this.titleEl.setText("Sync preview");
     if (this.r.error) this.contentEl.createEl("p", { text: this.r.error.message });
-    else if (this.r.decision) this.contentEl.createEl("p", { text: `Needs a decision first: ${this.r.decision.kind}` });
     else if (!this.r.preview?.length) this.contentEl.createEl("p", { text: "Nothing to sync." });
     for (const p of this.r.preview ?? []) this.contentEl.createEl("div", { text: `${p.action}: ${p.path}` });
     this.contentEl.createEl("p", { text: "Nothing was changed.", cls: "bgs-log-empty" });
