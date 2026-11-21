@@ -42,6 +42,13 @@ Feature: Guard rails against data loss
     And the 10 written files match the remote by blob SHA and aren't treated as conflicts
     And the remaining 10 files are written
 
+  Scenario: Big uploads are sent in batches that survive suspension
+    Given I have 90 new notes to push
+    When sync runs
+    Then they are pushed as commits of at most 40 files, each labelled "part N of M"
+    And progress is saved after each commit
+    And if iOS suspends Obsidian between batches, the next sync sends only what's left, with no conflicts
+
   Scenario: The sync index is saved atomically
     When a sync finishes
     Then the new base commit and sync index are saved together in one write

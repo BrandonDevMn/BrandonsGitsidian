@@ -81,6 +81,7 @@ export interface EngineConfig {
 }
 
 const MAX_PUSH_RETRIES = 3;
+export const PUSH_BATCH = 40;
 
 export class SyncEngine {
   constructor(
@@ -138,6 +139,8 @@ export class SyncEngine {
     let state = this.loadState();
 
     // ---- remote head -------------------------------------------------------
+    let t0 = Date.now();
+    this.log.info(`Step 1/5: checking GitHub branch "${this.cfg.branch}"`);
     const head = await this.gh.branchHead(this.cfg.branch);
     if (head === null) {
       this.log.error(`Branch "${this.cfg.branch}" not found on GitHub`);
@@ -148,7 +151,7 @@ export class SyncEngine {
 
     // ---- push-only fast path (app going to background) --------------------
     if (opts.pushOnly && (remoteEmpty || head !== state.baseCommit)) {
-      this.log.info("Push-only sync skipped: GitHub has changes that need pulling first");
+      this.log.info("Quick push skipped: GitHub has new changes, so a full sync is needed first (it'll run when you come back)");
       return { ...result, status: "skipped" };
     }
 
@@ -156,8 +159,15 @@ export class SyncEngine {
     const oversized = new Set<string>();
     const local = new Map<string, string>();
     const localStat = new Map<string, FileStat>();
+    t0 = Date.now();
+    this.log.info("Step 2/5: scanning the vault");
+    let hashed = 0;
+    let excludedLocal = 0;
     for (const f of await this.vault.list()) {
-      if (isExcluded(f.path, this.cfg.excludes)) continue;
+      if (isExcluded(f.path, this.cfg.excludes)) {
+        excludedLocal++;
+        continue;
+      }
       if (f.size > this.cfg.maxFileBytes) {
         oversized.add(f.path);
         result.skipped.push({ path: f.path, reason: `${mb(f.size)} MB is over the ${mb(this.cfg.maxFileBytes)} MB limit` });
@@ -170,17 +180,25 @@ export class SyncEngine {
         local.set(f.path, cached.sha);
       } else {
         local.set(f.path, await gitBlobSha(await this.vault.read(f.path)));
-        this.log.debug(`Hashed ${f.path}`);
+        hashed++;
+        this.log.debug(`Read and hashed ${f.path} (${kb(f.size)}): ${cached ? "size or date changed since last sync" : "not seen before"}`);
       }
     }
+    this.log.info(
+      `Vault: ${local.size} tracked files; ${hashed} read and hashed, ${local.size - hashed} unchanged since last sync${excludedLocal ? `; ${excludedLocal} excluded` : ""} (${Date.now() - t0} ms)`,
+    );
 
     // ---- remote snapshot ---------------------------------------------------
     const remote = new Map<string, string>();
     let remoteTree: string | null = null;
-    if (!remoteEmpty) {
+    t0 = Date.now();
+    this.log.info("Step 3/5: reading GitHub's files");
+    if (remoteEmpty) {
+      this.log.info("GitHub: the repository is empty");
+    } else {
       if (state.baseCommit === head) {
         for (const [p, e] of Object.entries(state.index)) remote.set(p, e.sha);
-        this.log.debug("Remote head unchanged; reused the index instead of reading the tree");
+        this.log.info(`GitHub hasn't changed since the last sync (${short(head)}), so its file list was reused`);
       } else {
         if (state.baseCommit && !(await this.gh.isAncestor(state.baseCommit, head))) {
           this.log.error("GitHub's history no longer contains the last synced commit");
@@ -202,6 +220,7 @@ export class SyncEngine {
           }
           remote.set(e.path, e.sha);
         }
+        this.log.info(`GitHub: ${remote.size} files at ${short(head)} (${Date.now() - t0} ms)`);
         if (state.baseCommit) {
           try {
             result.remoteCommits = (await this.gh.commitsBetween(state.baseCommit, head)).map((c) => ({
@@ -256,7 +275,13 @@ export class SyncEngine {
 
     // ---- classify ----------------------------------------------------------
     const actions = classifyAll({ base, local, remote });
-    for (const [p, a] of actions) if (a.kind !== "unchanged") this.log.debug(`Classified ${p}: ${describe(a)}`);
+    this.log.info(`Step 4/5: planning — ${planSummary(actions)}`);
+    const changed = [...actions].filter(([, a]) => a.kind !== "unchanged");
+    for (const [p, a] of changed) {
+      const line = `Classified ${p}: ${describe(a)}`;
+      if (changed.length <= 50 && a.kind !== "same") this.log.info(line);
+      else this.log.debug(line);
+    }
 
     if (opts.dryRun) {
       result.preview = [...actions].filter(([, a]) => a.kind !== "unchanged" && a.kind !== "same").map(([path, a]) => ({ path, action: describe(a) }));
@@ -274,6 +299,10 @@ export class SyncEngine {
     const nextIndex = new Map<string, IndexEntry>();
     const toPush: PushedChange[] = [];
     const now = this.cfg.now ?? (() => new Date());
+    const pullTotal = [...actions].filter(([, a]) => a.kind === "pull" || a.kind === "conflict").length;
+    let pullN = 0;
+    t0 = Date.now();
+    this.log.info(`Step 5/5: applying changes${pullTotal ? ` (${pullTotal} from GitHub)` : ""}`);
 
     for (const [path, a] of actions) {
       const stat = localStat.get(path);
@@ -286,16 +315,17 @@ export class SyncEngine {
           break;
         case "pull": {
           if (opts.pushOnly) break;
+          pullN++;
           if (a.change === "delete") {
             await this.vault.trash(path);
             result.trashed.push(path);
-            this.log.info(`Trashed ${path} (deleted on GitHub)`);
+            this.log.info(`Pulling ${pullN}/${pullTotal}: moved ${path} to the trash (deleted on GitHub)`);
           } else {
             const bytes = await this.gh.getBlob(remoteSha as string);
             const st = await this.vault.write(path, bytes);
             nextIndex.set(path, { sha: remoteSha as string, size: st.size, mtime: st.mtime });
             result.pulled.push(path);
-            this.log.info(`Pulled ${path} (${a.change})`);
+            this.log.info(`Pulling ${pullN}/${pullTotal}: ${path} (${a.change === "add" ? "new" : "updated"}, ${kb(bytes.byteLength)})`);
             if (firstSync && opts.firstSyncChoice === "github" && base.has(path)) {
               conflictEntries.push(await this.entry(path, "edit discarded", localSha, now()));
             }
@@ -307,6 +337,8 @@ export class SyncEngine {
           if (localSha && stat) nextIndex.set(path, { sha: localSha, size: stat.size, mtime: stat.mtime });
           break;
         case "conflict":
+          pullN++;
+          this.log.info(`Pulling ${pullN}/${pullTotal}: ${path} changed on both sides; resolving`);
           await this.resolveConflict(path, base.get(path), localSha, remoteSha, stat, nextIndex, toPush, conflictEntries, result, now());
           break;
       }
@@ -331,9 +363,12 @@ export class SyncEngine {
     // ---- push ----------------------------------------------------------------
     let newHead = remoteEmpty ? null : head;
     const uniquePush = dedupe(toPush);
+    if (pullTotal) this.log.info(`Applied ${pullTotal} change${pullTotal === 1 ? "" : "s"} from GitHub (${Date.now() - t0} ms)`);
     if (uniquePush.length) {
-      newHead = await this.push(uniquePush, remoteEmpty ? null : head, remoteTree, remote, nextIndex, firstSync && remote.size === 0);
+      t0 = Date.now();
+      newHead = await this.push(uniquePush, remoteEmpty ? null : head, remoteTree, remote, nextIndex, firstSync && remote.size === 0, state.repoKey);
       result.pushed = uniquePush.map((c) => c.path);
+      this.log.info(`Sent ${uniquePush.length} change${uniquePush.length === 1 ? "" : "s"} to GitHub (${Date.now() - t0} ms)`);
     }
 
     if (!result.pulled.length && !result.pushed.length && !result.trashed.length && !result.conflicts.length && !result.merged.length) {
@@ -420,44 +455,84 @@ export class SyncEngine {
     remote: Map<string, string>,
     nextIndex: Map<string, IndexEntry>,
     initial: boolean,
+    repoKey: string,
   ): Promise<string> {
     const message = commitMessage(changes, this.cfg.device, initial);
     let parent = head;
     let pending = [...changes];
+    const total = changes.length;
+    let sent = 0;
 
     if (parent === null) {
       // Empty repository: the Git Database API needs one commit first (specs/02, 05).
       const first = pending.find((c) => c.change !== "delete");
       if (!first) throw new GitHubError("other", "Nothing to upload to an empty repository");
-      this.log.info(`Initialising empty repository with ${first.path}`);
+      this.log.info(`Uploading ${++sent}/${total}: ${first.path} (first file initialises the empty repository)`);
       parent = await this.gh.initEmptyRepo(this.cfg.branch, first.path, await this.vault.read(first.path), message);
       pending = pending.filter((c) => c !== first);
-      if (!pending.length) return parent;
       knownTree = null;
+      await this.saveProgress(parent, nextIndex, pending, remote, repoKey);
     }
 
-    const entries: { path: string; sha: string | null }[] = [];
-    for (const c of pending) {
-      if (c.change === "delete") {
-        if (remote.has(c.path)) entries.push({ path: c.path, sha: null });
-        else this.log.debug(`Not sending deletion for ${c.path}: already gone on GitHub`);
-        continue;
+    // Big pushes go in batches, each its own commit, with progress saved after each,
+    // so an iOS suspension mid-upload doesn't lose the work (specs/08).
+    const batches: PushedChange[][] = [];
+    for (let i = 0; i < pending.length; i += PUSH_BATCH) batches.push(pending.slice(i, i + PUSH_BATCH));
+    for (const [bi, batch] of batches.entries()) {
+      const entries: { path: string; sha: string | null }[] = [];
+      for (const c of batch) {
+        sent++;
+        if (c.change === "delete") {
+          if (remote.has(c.path)) {
+            entries.push({ path: c.path, sha: null });
+            this.log.info(`Uploading ${sent}/${total}: delete ${c.path}`);
+          } else this.log.info(`Uploading ${sent}/${total}: ${c.path} is already gone on GitHub; nothing to send`);
+          continue;
+        }
+        const bytes = await this.vault.read(c.path);
+        const sha = await this.gh.createBlob(bytes);
+        const expected = nextIndex.get(c.path)?.sha;
+        if (expected && expected !== sha) this.log.warn(`Blob SHA mismatch for ${c.path}: local ${short(expected)}, GitHub ${short(sha)}`);
+        entries.push({ path: c.path, sha });
+        this.log.info(`Uploading ${sent}/${total}: ${c.path} (${c.change === "add" ? "new" : "updated"}, ${kb(bytes.byteLength)})`);
       }
-      const bytes = await this.vault.read(c.path);
-      const sha = await this.gh.createBlob(bytes);
-      const expected = nextIndex.get(c.path)?.sha;
-      if (expected && expected !== sha) this.log.warn(`Blob SHA mismatch for ${c.path}: local ${short(expected)}, GitHub ${short(sha)}`);
-      entries.push({ path: c.path, sha });
-      this.log.debug(`Uploaded ${c.path}`);
+      if (!entries.length) continue;
+      const baseTree = knownTree ?? (await this.gh.commitTree(parent));
+      const tree = await this.gh.createTree(baseTree, entries);
+      const batchMsg = batches.length > 1 ? `${message.split("\n")[0]} (part ${bi + 1} of ${batches.length})\n\n${commitMessage(batch, this.cfg.device).split("\n\n")[1] ?? ""}` : message;
+      const commit = await this.gh.createCommit(batchMsg, tree, [parent]);
+      await this.gh.updateBranch(this.cfg.branch, commit);
+      this.log.info(
+        `Committed ${batches.length > 1 ? `batch ${bi + 1}/${batches.length} ` : ""}as ${short(commit)}: ${batchMsg.split("\n")[0]}`,
+      );
+      parent = commit;
+      knownTree = tree;
+      for (const c of batch) {
+        if (c.change === "delete") remote.delete(c.path);
+        else remote.set(c.path, nextIndex.get(c.path)?.sha ?? "");
+      }
+      const rest = batches.slice(bi + 1).flat();
+      if (rest.length) await this.saveProgress(parent, nextIndex, rest, remote, repoKey);
     }
-    if (!entries.length) return parent;
+    return parent;
+  }
 
-    const baseTree = knownTree ?? (await this.gh.commitTree(parent));
-    const tree = await this.gh.createTree(baseTree, entries);
-    const commit = await this.gh.createCommit(message, tree, [parent]);
-    await this.gh.updateBranch(this.cfg.branch, commit);
-    this.log.info(`Pushed commit ${short(commit)}: ${message.split("\n")[0]}`);
-    return commit;
+  /** Saves a base + index that's consistent mid-push: not-yet-pushed paths keep GitHub's version as their base. */
+  private async saveProgress(
+    commit: string,
+    nextIndex: Map<string, IndexEntry>,
+    notYetPushed: PushedChange[],
+    remote: Map<string, string>,
+    repoKey: string,
+  ): Promise<void> {
+    const idx = new Map(nextIndex);
+    for (const c of notYetPushed) {
+      const r = remote.get(c.path);
+      if (r) idx.set(c.path, { sha: r, size: -1, mtime: -1 });
+      else idx.delete(c.path);
+    }
+    await this.saveState({ repoKey, baseCommit: commit, index: Object.fromEntries(idx) });
+    this.log.debug(`Saved progress at ${short(commit)}; ${notYetPushed.length} change(s) still to send`);
   }
 }
 
@@ -478,6 +553,22 @@ function describe(a: Action): string {
 
 function short(sha: string): string {
   return sha.slice(0, 7);
+}
+
+function kb(bytes: number): string {
+  return bytes < 1024 ? `${bytes} B` : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${mb(bytes)} MB`;
+}
+
+function planSummary(actions: Map<string, Action>): string {
+  const n = { pull: 0, push: 0, del: 0, conflict: 0, same: 0, unchanged: 0 };
+  for (const a of actions.values()) {
+    if (a.kind === "pull" || a.kind === "push") {
+      if (a.change === "delete") n.del++;
+      else n[a.kind]++;
+    } else n[a.kind]++;
+  }
+  const parts = [`${n.pull} to pull`, `${n.push} to push`, `${n.del} to delete`, `${n.conflict} changed on both sides`, `${n.unchanged + n.same} unchanged`];
+  return parts.join(", ");
 }
 
 function mb(bytes: number): string {

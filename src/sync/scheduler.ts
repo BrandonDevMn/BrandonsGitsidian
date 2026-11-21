@@ -17,6 +17,7 @@ export class SingleFlight<R> {
   constructor(
     private run: (req: RunRequest) => Promise<R>,
     private isOnline: () => boolean = () => true,
+    private note: (msg: string) => void = () => {},
   ) {}
 
   get busy(): boolean {
@@ -25,11 +26,21 @@ export class SingleFlight<R> {
 
   /** Automatic triggers respect pause and offline; manual ones only respect offline. */
   async request(req: RunRequest, manual = false): Promise<R | null> {
-    if (this.paused && !manual) return null;
-    if (!this.isOnline()) return null;
+    const what = `${req.pushOnly ? "Quick push" : "Sync"} (${req.trigger})`;
+    if (this.paused && !manual) {
+      this.note(`${what} not started: automatic sync is paused`);
+      return null;
+    }
+    if (!this.isOnline()) {
+      this.note(`${what} not started: the device is offline`);
+      return null;
+    }
     if (this.running) {
       // A full sync request upgrades a queued push-only one.
-      if (!this.queued || (this.queued.pushOnly && !req.pushOnly)) this.queued = req;
+      if (!this.queued || (this.queued.pushOnly && !req.pushOnly)) {
+        this.queued = req;
+        this.note(`${what} queued: a sync is already running`);
+      } else this.note(`${what} folded into the already-queued sync`);
       return null;
     }
     return this.start(req);
@@ -43,7 +54,10 @@ export class SingleFlight<R> {
       this.running = null;
       const next = this.queued;
       this.queued = null;
-      if (next) void this.start(next);
+      if (next) {
+        this.note(`Starting queued ${next.pushOnly ? "quick push" : "sync"} (${next.trigger})`);
+        void this.start(next);
+      }
     }
   }
 }
@@ -53,8 +67,9 @@ export class Countdown {
   private timer: ReturnType<typeof setTimeout> | null = null;
   constructor(
     private fire: () => void,
-    private set: (fn: () => void, ms: number) => ReturnType<typeof setTimeout> = setTimeout,
-    private clear: (t: ReturnType<typeof setTimeout>) => void = clearTimeout,
+    // Wrapped: calling a bare setTimeout as a method throws "Illegal invocation" in WebKit.
+    private set: (fn: () => void, ms: number) => ReturnType<typeof setTimeout> = (fn, ms) => setTimeout(fn, ms),
+    private clear: (t: ReturnType<typeof setTimeout>) => void = (t) => clearTimeout(t),
   ) {}
 
   restart(ms: number): void {

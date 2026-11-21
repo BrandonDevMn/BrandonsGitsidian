@@ -81,7 +81,7 @@ export class GitHubClient {
 
   private async call<T>(method: HttpRequest["method"], path: string, body?: unknown, write = false): Promise<T> {
     if (write) {
-      const gap = this.o.writeGapMs ?? 1000;
+      const gap = this.o.writeGapMs ?? 800; // ~75/min, under GitHub's 80/min
       const wait = this.lastWrite === null ? 0 : this.lastWrite + gap - this.now();
       if (wait > 0) await this.sleep(wait);
       this.lastWrite = this.now();

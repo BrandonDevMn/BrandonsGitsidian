@@ -63,7 +63,11 @@ export default class BrandonGitsidianPlugin extends Plugin {
     this.log.info(`Plugin loaded (v${this.manifest.version}, Obsidian API ${apiVersion}, ${Platform.isIosApp ? "iOS" : Platform.isMobile ? "mobile" : "desktop"})`);
     this.log.onChange(() => this.scheduleLogSave());
 
-    this.runner = new SingleFlight((req) => this.runSync(req), () => navigator.onLine !== false);
+    this.runner = new SingleFlight(
+      (req) => this.runSync(req),
+      () => navigator.onLine !== false,
+      (msg) => this.log.info(msg),
+    );
     this.runner.paused = this.settings.paused;
     this.typing = new Countdown(() => void this.runner.request({ trigger: "after edits" }));
 
@@ -113,7 +117,16 @@ export default class BrandonGitsidianPlugin extends Plugin {
     if (isExcluded(f.path, this.settings.excludes) || f.path === LOG_NOTE_PATH) return;
     this.dirty = true;
     if (!this.runner.busy) this.setRibbon("dirty");
-    if (this.settings.pushAfterEdits) this.typing.restart(this.settings.pushDelaySeconds * 1000);
+    if (this.settings.pushAfterEdits) {
+      const first = !this.typing.pending;
+      this.typing.restart(this.settings.pushDelaySeconds * 1000);
+      // Log the first edit of a burst at info, the rest at debug, so the log stays readable.
+      const msg = `Edit detected in ${f.path}; push scheduled in ${this.settings.pushDelaySeconds}s after typing stops`;
+      if (first) this.log.info(msg);
+      else this.log.debug(msg);
+    } else {
+      this.log.debug(`Edit detected in ${f.path}; will sync on the next trigger`);
+    }
   }
 
   private onVisibility(): void {
@@ -122,6 +135,7 @@ export default class BrandonGitsidianPlugin extends Plugin {
       this.log.info("Obsidian went to the background");
       if (this.dirty) {
         this.typing.cancel();
+        this.log.info("Unsynced edits: trying a quick push before iOS suspends the app");
         void this.runner.request({ trigger: "leaving app", pushOnly: true });
       }
       void this.saveAll();
@@ -129,6 +143,7 @@ export default class BrandonGitsidianPlugin extends Plugin {
       const away = this.away.visible();
       this.log.info(`Obsidian came back after ${Math.round(away / 1000)}s`);
       if (this.settings.syncOnReturn && away >= RETURN_AFTER_MS) void this.runner.request({ trigger: "app returned" });
+      else if (this.settings.syncOnReturn) this.log.debug(`No sync on return: away less than ${RETURN_AFTER_MS / 1000}s`);
     }
   }
 
@@ -168,6 +183,7 @@ export default class BrandonGitsidianPlugin extends Plugin {
     const s = this.settings;
     const token = s.tokenSecretId ? this.app.secretStorage.getSecret(s.tokenSecretId) : null;
     if (!token) {
+      this.log.error(s.tokenSecretId ? `No token found in the keychain under "${s.tokenSecretId}"` : "No GitHub token chosen in settings");
       this.reportError("no-token", "Pick a GitHub token in BrandonGitsidian settings first.");
       return null;
     }

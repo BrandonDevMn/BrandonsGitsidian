@@ -15,6 +15,20 @@ Feature: Detailed log
     And a "sync finished" entry records the outcome and counts of pulled, pushed, trashed, merged, conflicted and skipped files
     And the total time the sync took
 
+  Scenario: Each sync reads like a story
+    When a sync runs
+    Then the log announces each step: "Step 1/5: checking GitHub", "Step 2/5: scanning the vault", "Step 3/5: reading GitHub's files", "Step 4/5: planning", "Step 5/5: applying changes"
+    And the scan says how many files were re-read and how many were unchanged, with the time taken
+    And the plan says how many files will be pulled, pushed, deleted, changed on both sides, or left alone
+    And each file shows progress, such as "Pulling 2/5: characters/voki.md (updated, 1.2 KB)" or "Uploading 3/40: ..."
+    And each commit is logged with its short SHA and message
+
+  Scenario: The log explains why a sync did or didn't run
+    When a trigger fires
+    Then the log says what triggered it
+    And if it didn't start, why: paused, offline, or queued behind a running sync
+    And edits log when a push is scheduled after typing stops
+
   Scenario: GitHub requests are logged
     When the plugin makes a request to GitHub
     Then the log records the method, the API path, the HTTP status and the time taken in milliseconds

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { SyncEngine, type SyncState, type SyncOptions } from "../src/sync/engine";
-import { GitHubClient } from "../src/github/client";
+import { GitHubClient, type Http } from "../src/github/client";
 import { Logger, formatLog } from "../src/core/logger";
 import { DEFAULT_EXCLUDES, CONFLICT_LOG_PATH } from "../src/core/paths";
 import { FakeGitHub } from "./fakeGitHub";
@@ -435,5 +435,71 @@ describe("13 detailed log during sync", () => {
   it("never logs note contents", async () => {
     const t = await synced({ "a.md": "SECRET-CONTENT-123" });
     expect(formatLog(t.log.all())).not.toContain("SECRET-CONTENT-123");
+  });
+});
+
+describe("08 big pushes are batched and resumable", () => {
+  it("splits a large push into commits of 40 and saves progress after each", async () => {
+    const t = await synced({ "seed.md": "s" });
+    for (let i = 0; i < 90; i++) t.vault.set(`n/${i}.md`, `v${i}`);
+    const commits = t.gh.commits.size;
+    const saves = t.saves.length;
+    const r = await t.sync();
+    expect(r.pushed).toHaveLength(90);
+    expect(t.gh.commits.size - commits).toBe(3);
+    expect(t.gh.headMessage()).toMatch(/\(part 3 of 3\)/);
+    expect(t.saves.length - saves).toBeGreaterThanOrEqual(3);
+    expect(Object.keys(t.gh.files())).toHaveLength(91);
+  });
+
+  it("an upload interrupted between batches resumes without losing or duplicating work", async () => {
+    const t = await synced({ "seed.md": "s", "keep.md": "k" });
+    for (let i = 0; i < 50; i++) t.vault.set(`n/${i}.md`, `v${i}`);
+    t.vault.set("keep.md", "k2"); // an update to an existing file
+
+    // Simulate iOS suspending the app right after the first batch's commit lands.
+    const client = t.client as unknown as { o: { http: Http } };
+    const realHttp = client.o.http;
+    let committedOnce = false;
+    client.o.http = async (req) => {
+      if (committedOnce) throw new Error("suspended");
+      const res = await realHttp(req);
+      if (req.method === "PATCH") committedOnce = true;
+      return res;
+    };
+    const r1 = await t.sync();
+    expect(r1.status).toBe("error");
+    const partial = Object.keys(t.gh.files()).length;
+    expect(partial).toBeGreaterThan(2);
+    expect(partial).toBeLessThan(52);
+
+    client.o.http = realHttp;
+    const r2 = await t.sync();
+    expect(r2.status).toBe("ok");
+    expect(r2.conflicts).toEqual([]);
+    expect(Object.keys(t.gh.files())).toHaveLength(52);
+    expect(t.gh.files()["keep.md"]).toBe("k2");
+  });
+});
+
+describe("13 the log reads like a story", () => {
+  it("announces each step, the plan and per-file progress", async () => {
+    const t = await synced({ "voki.md": "old", "a.md": "a" });
+    t.gh.commitFiles("main", { "voki.md": "new" });
+    t.vault.set("a.md", "a2");
+    await t.sync();
+    const story = t.log.list({ run: 2, level: "info" }).map((e) => e.msg);
+    expect(story).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/^Step 1\/5: checking GitHub branch "main"/),
+        expect.stringMatching(/^Step 2\/5: scanning the vault/),
+        expect.stringMatching(/^Vault: 2 tracked files; 1 read and hashed, 1 unchanged since last sync/),
+        expect.stringMatching(/^GitHub: 2 files at [0-9a-f]{7}/),
+        "Step 4/5: planning — 1 to pull, 1 to push, 0 to delete, 0 changed on both sides, 0 unchanged",
+        expect.stringMatching(/^Pulling 1\/1: voki.md \(updated, 3 B\)/),
+        expect.stringMatching(/^Uploading 1\/1: a.md \(updated, 2 B\)/),
+        expect.stringMatching(/^Committed as [0-9a-f]{7}: BrandonGitsidian: 1 note from/),
+      ]),
+    );
   });
 });
