@@ -9,6 +9,8 @@ import { obsidianHttp } from "./obsidian/http";
 import { ObsidianVaultIO } from "./obsidian/vaultIO";
 import { BrandonGitsidianSettingTab, DEFAULT_SETTINGS, loadSettings, notice, type Settings } from "./obsidian/settings";
 import { LOG_VIEW, LogView } from "./obsidian/logView";
+import { CODE_VIEW, CodeView } from "./obsidian/codeView";
+import { VIEWER_EXTENSIONS } from "./core/codeFiles";
 
 const LOG_NOTE_PATH = "_brandon-gitsidian/detailed log.md";
 const RETURN_AFTER_MS = 30_000;
@@ -76,6 +78,7 @@ export default class BrandonGitsidianPlugin extends Plugin {
     this.typing = new Countdown(() => void this.runner.request({ trigger: "after edits" }));
 
     this.registerView(LOG_VIEW, (leaf) => new LogView(leaf, this));
+    this.registerCodeViewer();
     this.addSettingTab(new BrandonGitsidianSettingTab(this.app, this));
 
     this.ribbon = this.addRibbonIcon("refresh-cw", "BrandonGitsidian: sync now", () => void this.syncNow("ribbon"));
@@ -116,6 +119,21 @@ export default class BrandonGitsidianPlugin extends Plugin {
 
     this.registerDomEvent(document, "visibilitychange", () => this.onVisibility());
     this.restartInterval();
+  }
+
+  /** Opens code and text files read-only (specs/files/01). Types another plugin already owns are skipped. */
+  private registerCodeViewer(): void {
+    this.registerView(CODE_VIEW, (leaf) => new CodeView(leaf, this.log));
+    const skipped: string[] = [];
+    for (const ext of VIEWER_EXTENSIONS) {
+      try {
+        this.registerExtensions([ext], CODE_VIEW);
+      } catch {
+        skipped.push(ext);
+      }
+    }
+    this.log.info(`Code viewer: opens ${VIEWER_EXTENSIONS.length - skipped.length} file types read-only`);
+    if (skipped.length) this.log.warn(`Code viewer: another plugin already opens .${skipped.join(", .")}, so those are left to it`);
   }
 
   onunload(): void {

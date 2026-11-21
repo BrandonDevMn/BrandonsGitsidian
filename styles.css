@@ -32,3 +32,13 @@
   border-top: 1px solid var(--background-modifier-border);
   text-align: center;
 }
+
+/* read-only code and text viewer (specs/files/01). Wraps long lines for the phone. */
+.bgs-code { padding: 0; }
+.bgs-code-body { height: 100%; overflow: auto; }
+.bgs-code-pre { margin: 0; padding: 8px 0; background: var(--code-background); font-family: var(--font-monospace); font-size: var(--code-size); user-select: text; -webkit-user-select: text; }
+.bgs-code-pre code { display: block; background: transparent; padding: 0; white-space: normal; }
+.bgs-code-line { display: flex; align-items: flex-start; }
+.bgs-code-num { flex: 0 0 auto; min-width: 3em; padding: 0 0.75em 0 0.5em; text-align: right; color: var(--text-faint); user-select: none; -webkit-user-select: none; }
+.bgs-code-text { flex: 1 1 auto; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; padding-right: 0.5em; }
+.bgs-code-message { padding: 24px 16px; color: var(--text-muted); text-align: center; }
