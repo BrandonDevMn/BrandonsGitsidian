@@ -496,3 +496,49 @@ describe("13 the log reads like a story", () => {
     );
   });
 });
+
+describe("sync/01 dot files sync like any other file", () => {
+  it("pulls dot files from GitHub but never Obsidian's, git's or the trash's", async () => {
+    const t = setup();
+    t.gh.commitFiles("main", {
+      ".github/workflows/release.yml": "on: push",
+      ".gitignore": "node_modules/",
+      "code/scripts/.env.example": "TOKEN=",
+      ".obsidian/app.json": "{}",
+      ".trash/old idea.md": "o",
+    });
+    const r = await t.sync();
+    expect(r.pulled.sort()).toEqual([".github/workflows/release.yml", ".gitignore", "code/scripts/.env.example"]);
+    expect(t.vault.text(".gitignore")).toBe("node_modules/");
+    expect(t.vault.files.has(".obsidian/app.json")).toBe(false);
+    expect(t.vault.files.has(".trash/old idea.md")).toBe(false);
+  });
+
+  it("pushes edits and additions to dot files", async () => {
+    const t = await synced({ ".gitignore": "a" });
+    t.vault.set(".gitignore", "a\nb");
+    t.vault.set(".claude/notes.md", "n");
+    const r = await t.sync();
+    expect(r.pushed.sort()).toEqual([".claude/notes.md", ".gitignore"]);
+    expect(t.gh.files()).toEqual({ ".claude/notes.md": "n", ".gitignore": "a\nb" });
+  });
+
+  it("never pushes .obsidian, .git or .trash even when they're listed (shown in the file explorer)", async () => {
+    const t = await synced({ "a.md": "A" });
+    t.vault.set(".obsidian/workspace.json", "{}");
+    t.vault.set(".git/HEAD", "ref: refs/heads/main");
+    t.vault.set(".trash/old idea.md", "o");
+    const r = await t.sync();
+    expect(r.pushed).toEqual([]);
+    expect(t.gh.files()).toEqual({ "a.md": "A" });
+  });
+
+  it("a dot file that disappears without Brandon deleting it is restored, not deleted on GitHub", async () => {
+    const t = await synced({ ".gitignore": "a" });
+    t.vault.delete(".gitignore");
+    const r = await t.sync();
+    expect(t.gh.files()).toEqual({ ".gitignore": "a" });
+    expect(t.vault.text(".gitignore")).toBe("a");
+    expect(r.pushed).toEqual([]);
+  });
+});

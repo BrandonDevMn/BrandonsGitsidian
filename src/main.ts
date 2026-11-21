@@ -11,6 +11,7 @@ import { BrandonGitsidianSettingTab, DEFAULT_SETTINGS, loadSettings, notice, typ
 import { LOG_VIEW, LogView } from "./obsidian/logView";
 import { CODE_VIEW, CodeView } from "./obsidian/codeView";
 import { VIEWER_EXTENSIONS } from "./core/codeFiles";
+import { HiddenFileRevealer, type AdapterInternals, type VaultConfig } from "./core/revealer";
 
 const LOG_NOTE_PATH = "_brandon-gitsidian/detailed log.md";
 const RETURN_AFTER_MS = 30_000;
@@ -45,6 +46,7 @@ export default class BrandonGitsidianPlugin extends Plugin {
   history: HistoryItem[] = [];
   userDeleted: string[] = [];
   log!: Logger;
+  hidden!: HiddenFileRevealer;
 
   private ribbon!: HTMLElement;
   private runner!: SingleFlight<SyncResult | null>;
@@ -79,6 +81,8 @@ export default class BrandonGitsidianPlugin extends Plugin {
 
     this.registerView(LOG_VIEW, (leaf) => new LogView(leaf, this));
     this.registerCodeViewer();
+    // Internal Obsidian API, isolated in core/revealer.ts; it switches itself off quietly if missing (specs/files/02).
+    this.hidden = new HiddenFileRevealer(this.app.vault.adapter as unknown as AdapterInternals, this.log, vaultConfig(this.app));
     this.addSettingTab(new BrandonGitsidianSettingTab(this.app, this));
 
     this.ribbon = this.addRibbonIcon("refresh-cw", "BrandonGitsidian: sync now", () => void this.syncNow("ribbon"));
@@ -115,6 +119,8 @@ export default class BrandonGitsidianPlugin extends Plugin {
         }),
       );
       if (this.settings.syncOnStartup) void this.runner.request({ trigger: "startup" });
+      // Show dot files in the background so Obsidian stays usable (specs/files/02).
+      if (this.hidden.enable()) void this.hidden.scan();
     });
 
     this.registerDomEvent(document, "visibilitychange", () => this.onVisibility());
@@ -139,13 +145,14 @@ export default class BrandonGitsidianPlugin extends Plugin {
   onunload(): void {
     this.log.info("Plugin unloaded");
     this.typing?.cancel();
+    void this.hidden?.disable(); // hide dot files again; nothing on disk changes (specs/files/02)
     void this.saveAll();
   }
 
   // ---- triggers --------------------------------------------------------------------
 
   private onVaultChange(f: TAbstractFile): void {
-    if (this.applying || !(f instanceof TFile)) return;
+    if (this.applying || this.hidden.scanning || this.hidden.hiding || !(f instanceof TFile)) return;
     if (isExcluded(f.path, this.settings.excludes) || f.path === LOG_NOTE_PATH) return;
     this.dirty = true;
     if (!this.runner.busy) this.setRibbon("dirty");
@@ -163,7 +170,8 @@ export default class BrandonGitsidianPlugin extends Plugin {
 
   /** Only deletions Brandon makes in Obsidian may delete files on GitHub; anything else that goes missing is restored (specs/08). */
   private noteUserDelete(f: TAbstractFile, path: string): void {
-    if (this.applying || !(f instanceof TFile)) return;
+    // Hiding dot files again (plugin off) removes them from the vault without deleting anything.
+    if (this.applying || this.hidden.hiding || !(f instanceof TFile)) return;
     if (isExcluded(path, this.settings.excludes) || path === LOG_NOTE_PATH) return;
     if (!this.userDeleted.includes(path)) this.userDeleted.push(path);
     this.log.info(`You deleted or renamed ${path} in Obsidian; it will be deleted on GitHub at the next sync`);
@@ -230,7 +238,11 @@ export default class BrandonGitsidianPlugin extends Plugin {
     }
     const client = new GitHubClient({ owner: s.owner, repo: s.repo, token, http: obsidianHttp, log: this.log });
     return new SyncEngine(
-      new ObsidianVaultIO(this.app),
+      new ObsidianVaultIO(
+        this.app,
+        (p) => isExcluded(p, s.excludes),
+        (p) => this.hidden.reveal(p),
+      ),
       client,
       { branch: s.branch, excludes: s.excludes, maxFileBytes: s.maxFileMB * 1024 * 1024, device: s.deviceName },
       this.log,
@@ -476,4 +488,11 @@ class HistoryModal extends Modal {
   onClose(): void {
     this.contentEl.empty();
   }
+}
+
+/** Obsidian's internal vault config, if this version has it. */
+function vaultConfig(app: App): VaultConfig | null {
+  const v = app.vault as unknown as { getConfig?: (k: string) => unknown; setConfig?: (k: string, val: unknown) => void };
+  if (typeof v.getConfig !== "function" || typeof v.setConfig !== "function") return null;
+  return { get: (k) => v.getConfig!(k), set: (k, val) => v.setConfig!(k, val) };
 }
