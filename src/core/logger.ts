@@ -1,4 +1,4 @@
-// Detailed log. See specs/10-status-and-history.feature "A detailed log I can read in the app".
+// Detailed log. See specs/13-detailed-log.feature.
 
 export type Level = "error" | "warn" | "info" | "debug";
 
@@ -6,9 +6,11 @@ export interface LogEntry {
   t: number; // epoch ms
   level: Level;
   msg: string;
+  run?: number; // sync run number, when written during a sync
 }
 
 export const MAX_LOG_ENTRIES = 2000;
+export const LEVELS: Level[] = ["error", "warn", "info", "debug"];
 const LEVEL_RANK: Record<Level, number> = { error: 0, warn: 1, info: 2, debug: 3 };
 const SECRET_PATTERNS = [
   /(gh[pousr]_[A-Za-z0-9]{20,})/g,
@@ -24,28 +26,59 @@ export function redact(text: string): string {
   return out;
 }
 
+export interface LogFilter {
+  level?: Level; // this level and more serious
+  search?: string;
+  run?: number;
+}
+
 export class Logger {
   private entries: LogEntry[];
   private listeners = new Set<() => void>();
+  private currentRun: number | undefined;
+  private lastRun: number;
+  debugEnabled = true;
 
   constructor(initial: LogEntry[] = [], private now: () => number = Date.now) {
     this.entries = initial.slice(-MAX_LOG_ENTRIES);
+    this.lastRun = initial.reduce((m, e) => Math.max(m, e.run ?? 0), 0);
   }
 
   error(msg: string): void { this.add("error", msg); }
   warn(msg: string): void { this.add("warn", msg); }
   info(msg: string): void { this.add("info", msg); }
-  debug(msg: string): void { this.add("debug", msg); }
+  debug(msg: string): void { if (this.debugEnabled) this.add("debug", msg); }
+
+  /** Starts a numbered sync run; entries until endRun() carry its number. */
+  startRun(): number {
+    this.currentRun = ++this.lastRun;
+    return this.currentRun;
+  }
+
+  endRun(): void {
+    this.currentRun = undefined;
+  }
 
   private add(level: Level, msg: string): void {
-    this.entries.push({ t: this.now(), level, msg: redact(msg) });
+    const e: LogEntry = { t: this.now(), level, msg: redact(msg) };
+    if (this.currentRun !== undefined) e.run = this.currentRun;
+    this.entries.push(e);
     if (this.entries.length > MAX_LOG_ENTRIES) this.entries.splice(0, this.entries.length - MAX_LOG_ENTRIES);
     for (const l of this.listeners) l();
   }
 
-  /** Newest first, filtered to `max` level and above. */
-  list(max: Level = "debug"): LogEntry[] {
-    return this.entries.filter((e) => LEVEL_RANK[e.level] <= LEVEL_RANK[max]).reverse();
+  /** Newest first, unless filtering to a single run (then oldest first, like a story). */
+  list(filter: LogFilter | Level = {}): LogEntry[] {
+    const f: LogFilter = typeof filter === "string" ? { level: filter } : filter;
+    const max = LEVEL_RANK[f.level ?? "debug"];
+    const q = f.search?.trim().toLowerCase();
+    const out = this.entries.filter(
+      (e) =>
+        LEVEL_RANK[e.level] <= max &&
+        (f.run === undefined || e.run === f.run) &&
+        (!q || e.msg.toLowerCase().includes(q)),
+    );
+    return f.run === undefined ? out.reverse() : out;
   }
 
   all(): LogEntry[] {
@@ -59,17 +92,19 @@ export class Logger {
 
   clear(): void {
     this.entries = [];
-    for (const l of this.listeners) l();
+    this.add("info", "Log cleared");
   }
 }
 
-export function formatLog(entries: LogEntry[]): string {
-  return entries.map(formatLine).join("\n");
+export function formatLog(entries: LogEntry[], header?: string): string {
+  const lines = entries.map(formatLine).join("\n");
+  return header ? `${header}\n\n${lines}` : lines;
 }
 
 export function formatLine(e: LogEntry): string {
   const d = new Date(e.t);
   const pad = (n: number, w = 2) => String(n).padStart(w, "0");
   const ts = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-  return `${ts} ${e.level.toUpperCase().padEnd(5)} ${e.msg}`;
+  const run = e.run !== undefined ? ` #${e.run}` : "";
+  return `${ts} ${e.level.toUpperCase().padEnd(5)}${run} ${e.msg}`;
 }

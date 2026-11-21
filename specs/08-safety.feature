@@ -16,7 +16,7 @@ Feature: Guard rails against data loss
     Then "notes/brand new.md" is uploaded, not deleted
 
   Scenario: Mass deletions need confirmation
-    Given a sync would delete 25 files or more than 10% of tracked files, on either side
+    Given a sync would delete 25 or more files, or at least 5 files that are more than 10% of tracked files, on either side
     When sync runs
     Then nothing is deleted yet
     And I'm shown the list of files that would be deleted

@@ -21,6 +21,7 @@ export class FakeGitHub {
   /** Called before a ref PATCH, to simulate someone pushing meanwhile. */
   beforeRefUpdate: (() => void) | null = null;
   rateRemaining = 4999;
+  offline = false;
   private n = 0;
 
   constructor(public owner = "BrandonDevMn", public repo = "Claudian") {}
@@ -71,6 +72,7 @@ export class FakeGitHub {
 
   // ---- Http implementation ----------------------------------------------
   http: Http = async (req) => {
+    if (this.offline) throw new Error("offline");
     this.requests.push(req);
     if (req.headers.Authorization !== `Bearer ${this.token}`) return res(401, { message: "Bad credentials" });
     this.rateRemaining--;

@@ -1,0 +1,502 @@
+// The sync engine. Pure orchestration over a VaultIO and a GitHubClient, so it can be
+// tested without Obsidian. Specs: 02, 03, 04, 05, 06, 08, 09.
+
+import { gitBlobSha, isTextPath, utf8 } from "../core/blob";
+import { classifyAll, type Action } from "../core/classify";
+import { addEntries, type ConflictEntry } from "../core/conflictLog";
+import { commitMessage, type PushedChange } from "../core/commitMessage";
+import { mergeText } from "../core/merge";
+import { CONFLICT_LOG_PATH, isExcluded, isValidOnIos } from "../core/paths";
+import { isMassDeletion, vaultLooksWiped } from "../core/safety";
+import type { Logger } from "../core/logger";
+import { GitHubError, type GitHubClient } from "../github/client";
+
+export interface FileStat {
+  path: string;
+  size: number;
+  mtime: number;
+}
+
+/** What the engine needs from the vault. In the plugin this wraps Obsidian's Vault API. */
+export interface VaultIO {
+  list(): Promise<FileStat[]>;
+  read(path: string): Promise<Uint8Array>;
+  /** Create or overwrite; creates parent folders. Returns the new stat. */
+  write(path: string, bytes: Uint8Array): Promise<FileStat>;
+  /** Move to trash per the user's Obsidian setting. */
+  trash(path: string): Promise<void>;
+}
+
+export interface IndexEntry {
+  sha: string;
+  size: number;
+  mtime: number;
+}
+
+export interface SyncState {
+  repoKey: string; // owner/repo@branch the index belongs to
+  baseCommit: string | null;
+  index: Record<string, IndexEntry>;
+}
+
+export type FirstSyncChoice = "github" | "vault" | "merge";
+
+export interface SyncOptions {
+  trigger: string;
+  pushOnly?: boolean; // quick push when the app is hidden (specs/07)
+  dryRun?: boolean; // preview (specs/08)
+  firstSyncChoice?: FirstSyncChoice;
+  confirmMassDeletion?: boolean;
+  restoreWipedVault?: boolean;
+}
+
+export type Decision =
+  | { kind: "first-sync" }
+  | { kind: "mass-deletion"; paths: string[] }
+  | { kind: "vault-wiped" }
+  | { kind: "history-rewritten" }
+  | { kind: "branch-missing" };
+
+export interface SyncResult {
+  status: "ok" | "nothing-to-do" | "needs-decision" | "error" | "skipped";
+  decision?: Decision;
+  error?: { kind: string; message: string };
+  pulled: string[];
+  pushed: string[];
+  trashed: string[];
+  merged: string[];
+  conflicts: string[];
+  skipped: { path: string; reason: string }[];
+  remoteCommits: { message: string; author: string }[];
+  preview?: { path: string; action: string }[];
+  newHead?: string;
+}
+
+export interface EngineConfig {
+  branch: string;
+  excludes: string[];
+  maxFileBytes: number;
+  device: string;
+  now?: () => Date;
+}
+
+const MAX_PUSH_RETRIES = 3;
+
+export class SyncEngine {
+  constructor(
+    private vault: VaultIO,
+    private gh: GitHubClient,
+    private cfg: EngineConfig,
+    private log: Logger,
+    private loadState: () => SyncState,
+    private saveState: (s: SyncState) => Promise<void>,
+  ) {}
+
+  async sync(opts: SyncOptions): Promise<SyncResult> {
+    const run = this.log.startRun();
+    const started = Date.now();
+    this.log.info(`Sync #${run} started (trigger: ${opts.trigger}${opts.pushOnly ? ", push only" : ""}${opts.dryRun ? ", preview" : ""})`);
+    try {
+      return await this.attempts(opts, started);
+    } finally {
+      this.log.endRun();
+    }
+  }
+
+  private async attempts(opts: SyncOptions, started: number): Promise<SyncResult> {
+    for (let attempt = 1; attempt <= MAX_PUSH_RETRIES + 1; attempt++) {
+      try {
+        const r = await this.once(opts);
+        this.log.info(
+          `Sync finished: ${r.status}${r.decision ? ` (${r.decision.kind})` : ""}; pulled ${r.pulled.length}, pushed ${r.pushed.length}, trashed ${r.trashed.length}, merged ${r.merged.length}, conflicts ${r.conflicts.length}, skipped ${r.skipped.length}; took ${Date.now() - started} ms`,
+        );
+        return r;
+      } catch (e) {
+        if (e instanceof GitHubError && e.kind === "not-fast-forward" && attempt <= MAX_PUSH_RETRIES) {
+          this.log.warn(`GitHub changed while pushing (attempt ${attempt}); pulling and rebuilding the commit`);
+          continue;
+        }
+        const r = empty("error");
+        if (e instanceof GitHubError) {
+          r.error = { kind: e.kind, message: friendly(e) };
+          this.log.error(`Sync stopped: ${e.kind}: ${e.message}`);
+        } else {
+          r.error = { kind: "internal", message: (e as Error).message };
+          this.log.error(`Sync stopped by an internal error: ${(e as Error).stack ?? e}`);
+        }
+        if (e instanceof GitHubError && e.kind === "not-fast-forward") {
+          r.error = { kind: e.kind, message: "GitHub kept changing. Try again in a minute." };
+        }
+        return r;
+      }
+    }
+    return empty("error");
+  }
+
+  private async once(opts: SyncOptions): Promise<SyncResult> {
+    const result = empty("ok");
+    let state = this.loadState();
+
+    // ---- remote head -------------------------------------------------------
+    const head = await this.gh.branchHead(this.cfg.branch);
+    if (head === null) {
+      this.log.error(`Branch "${this.cfg.branch}" not found on GitHub`);
+      return { ...result, status: "needs-decision", decision: { kind: "branch-missing" } };
+    }
+    const remoteEmpty = head === "empty";
+    this.log.info(`Remote head: ${remoteEmpty ? "(empty repository)" : short(head)}; base: ${state.baseCommit ? short(state.baseCommit) : "(none, first sync)"}`);
+
+    // ---- push-only fast path (app going to background) --------------------
+    if (opts.pushOnly && (remoteEmpty || head !== state.baseCommit)) {
+      this.log.info("Push-only sync skipped: GitHub has changes that need pulling first");
+      return { ...result, status: "skipped" };
+    }
+
+    // ---- local snapshot ----------------------------------------------------
+    const oversized = new Set<string>();
+    const local = new Map<string, string>();
+    const localStat = new Map<string, FileStat>();
+    for (const f of await this.vault.list()) {
+      if (isExcluded(f.path, this.cfg.excludes)) continue;
+      if (f.size > this.cfg.maxFileBytes) {
+        oversized.add(f.path);
+        result.skipped.push({ path: f.path, reason: `${mb(f.size)} MB is over the ${mb(this.cfg.maxFileBytes)} MB limit` });
+        this.log.warn(`Skipping ${f.path}: ${mb(f.size)} MB is over the limit`);
+        continue;
+      }
+      localStat.set(f.path, f);
+      const cached = state.index[f.path];
+      if (cached && cached.size === f.size && cached.mtime === f.mtime) {
+        local.set(f.path, cached.sha);
+      } else {
+        local.set(f.path, await gitBlobSha(await this.vault.read(f.path)));
+        this.log.debug(`Hashed ${f.path}`);
+      }
+    }
+
+    // ---- remote snapshot ---------------------------------------------------
+    const remote = new Map<string, string>();
+    let remoteTree: string | null = null;
+    if (!remoteEmpty) {
+      if (state.baseCommit === head) {
+        for (const [p, e] of Object.entries(state.index)) remote.set(p, e.sha);
+        this.log.debug("Remote head unchanged; reused the index instead of reading the tree");
+      } else {
+        if (state.baseCommit && !(await this.gh.isAncestor(state.baseCommit, head))) {
+          this.log.error("GitHub's history no longer contains the last synced commit");
+          return { ...result, status: "needs-decision", decision: { kind: "history-rewritten" } };
+        }
+        remoteTree = await this.gh.commitTree(head);
+        for (const e of await this.gh.listTree(remoteTree)) {
+          if (isExcluded(e.path, this.cfg.excludes)) continue;
+          if (!isValidOnIos(e.path)) {
+            result.skipped.push({ path: e.path, reason: "name isn't valid on iOS" });
+            this.log.warn(`Skipping ${e.path}: its name isn't valid on iOS`);
+            continue;
+          }
+          if (e.size > this.cfg.maxFileBytes) {
+            oversized.add(e.path);
+            result.skipped.push({ path: e.path, reason: `${mb(e.size)} MB is over the limit` });
+            this.log.warn(`Skipping remote ${e.path}: ${mb(e.size)} MB is over the limit`);
+            continue;
+          }
+          remote.set(e.path, e.sha);
+        }
+        if (state.baseCommit) {
+          try {
+            result.remoteCommits = (await this.gh.commitsBetween(state.baseCommit, head)).map((c) => ({
+              message: c.message.split("\n")[0] ?? "",
+              author: c.author,
+            }));
+            for (const c of result.remoteCommits) this.log.info(`New on GitHub: "${c.message}" by ${c.author}`);
+          } catch (e) {
+            this.log.debug(`Couldn't list new commits: ${(e as Error).message}`);
+          }
+        }
+      }
+    }
+
+    // ---- base snapshot -----------------------------------------------------
+    const base = new Map<string, string>();
+    const firstSync = state.baseCommit === null;
+    const conflictEntries: ConflictEntry[] = [];
+    if (firstSync) {
+      if (local.size > 0 && remote.size > 0) {
+        if (!opts.firstSyncChoice) {
+          this.log.info("First sync with files on both sides; waiting for a choice");
+          return { ...result, status: "needs-decision", decision: { kind: "first-sync" } };
+        }
+        this.log.info(`First sync choice: ${opts.firstSyncChoice}`);
+        for (const [p, l] of local) {
+          const r = remote.get(p);
+          if (r === undefined || r === l) continue;
+          if (opts.firstSyncChoice === "github") base.set(p, l); // remote differs -> pull update (logged below)
+          if (opts.firstSyncChoice === "vault") base.set(p, r); // local differs -> push update
+          // "merge": no base -> both-added conflict -> GitHub wins, logged
+        }
+      }
+    } else {
+      for (const [p, e] of Object.entries(state.index)) base.set(p, e.sha);
+    }
+    for (const p of oversized) {
+      base.delete(p);
+      local.delete(p);
+      remote.delete(p);
+    }
+
+    // ---- safety: wiped vault -----------------------------------------------
+    if (!firstSync && vaultLooksWiped(base.size, local.size)) {
+      if (!opts.restoreWipedVault) {
+        this.log.error("Vault looks empty but the index lists files; nothing will be deleted on GitHub");
+        return { ...result, status: "needs-decision", decision: { kind: "vault-wiped" } };
+      }
+      this.log.warn("Restoring a wiped vault from GitHub");
+      base.clear();
+    }
+
+    // ---- classify ----------------------------------------------------------
+    const actions = classifyAll({ base, local, remote });
+    for (const [p, a] of actions) if (a.kind !== "unchanged") this.log.debug(`Classified ${p}: ${describe(a)}`);
+
+    if (opts.dryRun) {
+      result.preview = [...actions].filter(([, a]) => a.kind !== "unchanged" && a.kind !== "same").map(([path, a]) => ({ path, action: describe(a) }));
+      return { ...result, status: result.preview.length ? "ok" : "nothing-to-do" };
+    }
+
+    // ---- safety: mass deletion ---------------------------------------------
+    const deletions = [...actions].filter(([, a]) => (a.kind === "push" || a.kind === "pull") && a.change === "delete").map(([p]) => p);
+    if (isMassDeletion(deletions.length, Math.max(base.size, local.size)) && !opts.confirmMassDeletion) {
+      this.log.warn(`Sync would delete ${deletions.length} files; asking first`);
+      return { ...result, status: "needs-decision", decision: { kind: "mass-deletion", paths: deletions } };
+    }
+
+    // ---- apply pulls and conflicts -----------------------------------------
+    const nextIndex = new Map<string, IndexEntry>();
+    const toPush: PushedChange[] = [];
+    const now = this.cfg.now ?? (() => new Date());
+
+    for (const [path, a] of actions) {
+      const stat = localStat.get(path);
+      const localSha = local.get(path);
+      const remoteSha = remote.get(path);
+      switch (a.kind) {
+        case "unchanged":
+        case "same":
+          if (localSha && stat) nextIndex.set(path, { sha: localSha, size: stat.size, mtime: stat.mtime });
+          break;
+        case "pull": {
+          if (opts.pushOnly) break;
+          if (a.change === "delete") {
+            await this.vault.trash(path);
+            result.trashed.push(path);
+            this.log.info(`Trashed ${path} (deleted on GitHub)`);
+          } else {
+            const bytes = await this.gh.getBlob(remoteSha as string);
+            const st = await this.vault.write(path, bytes);
+            nextIndex.set(path, { sha: remoteSha as string, size: st.size, mtime: st.mtime });
+            result.pulled.push(path);
+            this.log.info(`Pulled ${path} (${a.change})`);
+            if (firstSync && opts.firstSyncChoice === "github" && base.has(path)) {
+              conflictEntries.push(await this.entry(path, "edit discarded", localSha, now()));
+            }
+          }
+          break;
+        }
+        case "push":
+          toPush.push({ path, change: a.change });
+          if (localSha && stat) nextIndex.set(path, { sha: localSha, size: stat.size, mtime: stat.mtime });
+          break;
+        case "conflict":
+          await this.resolveConflict(path, base.get(path), localSha, remoteSha, stat, nextIndex, toPush, conflictEntries, result, now());
+          break;
+      }
+    }
+
+    // ---- conflict log --------------------------------------------------------
+    if (conflictEntries.length) {
+      let existing: string | null = null;
+      try {
+        existing = utf8.decode(await this.vault.read(CONFLICT_LOG_PATH));
+      } catch {
+        existing = null;
+      }
+      const doc = utf8.encode(addEntries(existing, conflictEntries));
+      const st = await this.vault.write(CONFLICT_LOG_PATH, doc);
+      const sha = await gitBlobSha(doc);
+      nextIndex.set(CONFLICT_LOG_PATH, { sha, size: st.size, mtime: st.mtime });
+      toPush.push({ path: CONFLICT_LOG_PATH, change: remote.has(CONFLICT_LOG_PATH) ? "update" : "add" });
+      this.log.info(`Wrote ${conflictEntries.length} conflict log entr${conflictEntries.length === 1 ? "y" : "ies"}`);
+    }
+
+    // ---- push ----------------------------------------------------------------
+    let newHead = remoteEmpty ? null : head;
+    const uniquePush = dedupe(toPush);
+    if (uniquePush.length) {
+      newHead = await this.push(uniquePush, remoteEmpty ? null : head, remoteTree, remote, nextIndex, firstSync && remote.size === 0);
+      result.pushed = uniquePush.map((c) => c.path);
+    }
+
+    if (!result.pulled.length && !result.pushed.length && !result.trashed.length && !result.conflicts.length && !result.merged.length) {
+      result.status = "nothing-to-do";
+    }
+
+    // ---- save state atomically (specs/08) ----------------------------------
+    if (newHead) {
+      state = { repoKey: state.repoKey, baseCommit: newHead, index: Object.fromEntries(nextIndex) };
+      await this.saveState(state);
+      result.newHead = newHead;
+      this.log.debug(`Saved state: base ${short(newHead)}, ${nextIndex.size} files`);
+    }
+    return result;
+  }
+
+  private async entry(path: string, what: ConflictEntry["what"], localSha: string | undefined, when: Date): Promise<ConflictEntry> {
+    const e: ConflictEntry = { when, device: this.cfg.device, path, what };
+    if (localSha === undefined) return e;
+    try {
+      const bytes = await this.vault.read(path);
+      if (isTextPath(path)) e.discardedText = utf8.decode(bytes);
+      else e.discardedSize = bytes.byteLength;
+    } catch {
+      /* already gone */
+    }
+    return e;
+  }
+
+  private async resolveConflict(
+    path: string,
+    baseSha: string | undefined,
+    localSha: string | undefined,
+    remoteSha: string | undefined,
+    stat: FileStat | undefined,
+    nextIndex: Map<string, IndexEntry>,
+    toPush: PushedChange[],
+    entries: ConflictEntry[],
+    result: SyncResult,
+    when: Date,
+  ): Promise<void> {
+    // Both sides have content: try a line merge for text with a known base.
+    if (localSha && remoteSha && baseSha && isTextPath(path)) {
+      const [b, mine, theirs] = await Promise.all([this.gh.getBlob(baseSha), this.vault.read(path), this.gh.getBlob(remoteSha)]);
+      const merged = mergeText(utf8.decode(b), utf8.decode(mine), utf8.decode(theirs));
+      if (merged.ok) {
+        const bytes = utf8.encode(merged.text);
+        const st = await this.vault.write(path, bytes);
+        nextIndex.set(path, { sha: await gitBlobSha(bytes), size: st.size, mtime: st.mtime });
+        toPush.push({ path, change: "update" });
+        result.merged.push(path);
+        this.log.info(`Merged edits from both sides in ${path}`);
+        return;
+      }
+      this.log.info(`Edits overlap in ${path}; GitHub's version wins`);
+    }
+
+    result.conflicts.push(path);
+    if (localSha && remoteSha) {
+      entries.push(await this.entry(path, localSha && !baseSha ? "new file discarded" : "edit discarded", localSha, when));
+      const bytes = await this.gh.getBlob(remoteSha);
+      const st = await this.vault.write(path, bytes);
+      nextIndex.set(path, { sha: remoteSha, size: st.size, mtime: st.mtime });
+      this.log.warn(`Conflict in ${path}: kept GitHub's version, logged mine`);
+    } else if (localSha && !remoteSha) {
+      entries.push(await this.entry(path, "edit discarded, file deleted on GitHub", localSha, when));
+      await this.vault.trash(path);
+      result.trashed.push(path);
+      this.log.warn(`Conflict in ${path}: deleted on GitHub, so my edits were trashed and logged`);
+    } else if (!localSha && remoteSha) {
+      entries.push({ when, device: this.cfg.device, path, what: "deletion undone" });
+      const bytes = await this.gh.getBlob(remoteSha);
+      const st = await this.vault.write(path, bytes);
+      nextIndex.set(path, { sha: remoteSha, size: st.size, mtime: st.mtime });
+      this.log.warn(`Conflict in ${path}: edited on GitHub, so my deletion was undone`);
+    }
+    void stat;
+  }
+
+  private async push(
+    changes: PushedChange[],
+    head: string | null,
+    knownTree: string | null,
+    remote: Map<string, string>,
+    nextIndex: Map<string, IndexEntry>,
+    initial: boolean,
+  ): Promise<string> {
+    const message = commitMessage(changes, this.cfg.device, initial);
+    let parent = head;
+    let pending = [...changes];
+
+    if (parent === null) {
+      // Empty repository: the Git Database API needs one commit first (specs/02, 05).
+      const first = pending.find((c) => c.change !== "delete");
+      if (!first) throw new GitHubError("other", "Nothing to upload to an empty repository");
+      this.log.info(`Initialising empty repository with ${first.path}`);
+      parent = await this.gh.initEmptyRepo(this.cfg.branch, first.path, await this.vault.read(first.path), message);
+      pending = pending.filter((c) => c !== first);
+      if (!pending.length) return parent;
+      knownTree = null;
+    }
+
+    const entries: { path: string; sha: string | null }[] = [];
+    for (const c of pending) {
+      if (c.change === "delete") {
+        if (remote.has(c.path)) entries.push({ path: c.path, sha: null });
+        else this.log.debug(`Not sending deletion for ${c.path}: already gone on GitHub`);
+        continue;
+      }
+      const bytes = await this.vault.read(c.path);
+      const sha = await this.gh.createBlob(bytes);
+      const expected = nextIndex.get(c.path)?.sha;
+      if (expected && expected !== sha) this.log.warn(`Blob SHA mismatch for ${c.path}: local ${short(expected)}, GitHub ${short(sha)}`);
+      entries.push({ path: c.path, sha });
+      this.log.debug(`Uploaded ${c.path}`);
+    }
+    if (!entries.length) return parent;
+
+    const baseTree = knownTree ?? (await this.gh.commitTree(parent));
+    const tree = await this.gh.createTree(baseTree, entries);
+    const commit = await this.gh.createCommit(message, tree, [parent]);
+    await this.gh.updateBranch(this.cfg.branch, commit);
+    this.log.info(`Pushed commit ${short(commit)}: ${message.split("\n")[0]}`);
+    return commit;
+  }
+}
+
+function empty(status: SyncResult["status"]): SyncResult {
+  return { status, pulled: [], pushed: [], trashed: [], merged: [], conflicts: [], skipped: [], remoteCommits: [] };
+}
+
+function dedupe(changes: PushedChange[]): PushedChange[] {
+  const m = new Map<string, PushedChange>();
+  for (const c of changes) m.set(c.path, c);
+  return [...m.values()];
+}
+
+function describe(a: Action): string {
+  if (a.kind === "push" || a.kind === "pull") return `${a.kind} ${a.change}`;
+  return a.kind;
+}
+
+function short(sha: string): string {
+  return sha.slice(0, 7);
+}
+
+function mb(bytes: number): string {
+  return (bytes / 1024 / 1024).toFixed(1).replace(/\.0$/, "");
+}
+
+export function friendly(e: GitHubError): string {
+  switch (e.kind) {
+    case "network":
+      return "Lost connection. Will finish next time.";
+    case "auth":
+      return "GitHub token expired or invalid. Update it in BrandonGitsidian settings.";
+    case "forbidden":
+      return 'This token can\'t write to the repo. Give it "Contents: Read and write" access.';
+    case "not-found":
+      return "Can't see the repository. Check the name and the token's repo access.";
+    case "rate-limited":
+      return `GitHub rate limit reached. Try again in about ${Math.ceil(e.retryAfterSec / 60)} min.`;
+    default:
+      return e.message;
+  }
+}

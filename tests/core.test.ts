@@ -6,7 +6,7 @@ import { mergeText } from "../src/core/merge";
 import { addEntries, MAX_ENTRIES } from "../src/core/conflictLog";
 import { commitMessage } from "../src/core/commitMessage";
 import { isMassDeletion, vaultLooksWiped } from "../src/core/safety";
-import { Logger, redact } from "../src/core/logger";
+import { Logger, redact, formatLog } from "../src/core/logger";
 
 describe("blob SHA (03 Blob SHAs are computed the same way git does)", () => {
   it("matches git hash-object for 'hello\\n'", async () => {
@@ -133,6 +133,8 @@ describe("safety (08)", () => {
     expect(isMassDeletion(25, 1000)).toBe(true);
     expect(isMassDeletion(19, 185)).toBe(true);
     expect(isMassDeletion(3, 185)).toBe(false);
+    expect(isMassDeletion(1, 3)).toBe(false); // tiny vaults aren't nagged
+    expect(isMassDeletion(5, 20)).toBe(true);
   });
   it("detects a wiped vault", () => {
     expect(vaultLooksWiped(185, 0)).toBe(true);
@@ -152,5 +154,26 @@ describe("detailed log (10)", () => {
     expect(log.all().length).toBe(2000);
     expect(log.list("error").map((e) => e.msg)).toEqual(["boom"]);
     expect(log.list()[0]?.msg).toBe("boom");
+  });
+  it("searches, filters by run, honours the debug switch and records clears", () => {
+    let t = 0;
+    const log = new Logger([], () => ++t);
+    log.info("before");
+    const run = log.startRun();
+    log.info("timeline.md pulled");
+    log.debug("HTTP GET x");
+    log.endRun();
+    log.debugEnabled = false;
+    log.debug("hidden");
+    expect(log.list({ search: "TIMELINE" }).map((e) => e.msg)).toEqual(["timeline.md pulled"]);
+    expect(log.list({ run }).map((e) => e.msg)).toEqual(["timeline.md pulled", "HTTP GET x"]);
+    expect(log.all().some((e) => e.msg === "hidden")).toBe(false);
+    expect(formatLog(log.list({ run }), "header")).toMatch(/^header\n\n.* INFO  #1 timeline.md pulled/);
+    let changes = 0;
+    const off = log.onChange(() => changes++);
+    log.clear();
+    off();
+    expect(log.all().map((e) => e.msg)).toEqual(["Log cleared"]);
+    expect(changes).toBe(1);
   });
 });
