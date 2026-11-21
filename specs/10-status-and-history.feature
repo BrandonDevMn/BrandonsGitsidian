@@ -46,6 +46,32 @@ Feature: Show what sync is doing and what it did
     And the short SHA of the base commit with a link to it on GitHub
     And the number of tracked files
 
+  Scenario: A detailed log I can read in the app
+    When I run the command "BrandonGitsidian: Open detailed log"
+    Then a log view opens inside Obsidian, readable on an iPhone screen
+    And it lists every step of recent syncs, newest first, with a timestamp and level
+    And steps include the trigger, each GitHub request with method, path, status and time taken
+    And each file read, written, trashed, merged or skipped, with the reason
+    And every decision from change classification, and every error with its full message
+    And I can filter by level: errors, info, or everything
+
+  Scenario: The detailed log survives restarts but stays small
+    Given iOS closed Obsidian since the last sync
+    When I open the detailed log
+    Then entries from before the restart are still there
+    And only the newest 2,000 entries are kept
+
+  @safety
+  Scenario: The detailed log never contains secrets
+    When any request is logged
+    Then the Authorization header and token are never written to the log
+    And file contents are never written to the detailed log
+
+  Scenario: Share the detailed log
+    When I tap "Copy log" in the log view
+    Then the log text is copied so I can paste it to Claude
+    And "Save log to note" writes it to "_brandon-gitsidian/detailed log.md"
+
   Scenario: Errors are shown once, not every 5 minutes
     Given automatic syncs keep failing for the same reason
     Then I see the error notice the first time
