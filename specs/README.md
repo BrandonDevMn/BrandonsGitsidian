@@ -1,6 +1,6 @@
 # Specs
 
-Gherkin feature files that define how Gitsidian behaves. They are the source of truth: if code and spec disagree, the spec wins until it's deliberately changed.
+Gherkin feature files that define how BrandonGitsidian behaves. They are the source of truth: if code and spec disagree, the spec wins until it's deliberately changed.
 
 ## Files
 

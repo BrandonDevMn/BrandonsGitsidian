@@ -11,7 +11,7 @@ Feature: Handle conflicts without losing anything
     Given I added a line under "## ooo s014" on the phone
     And Claude changed a line under "## ooo s003" in "B2"
     When sync runs
-    Then Gitsidian fetches the base version from GitHub by the blob SHA in the sync index
+    Then BrandonGitsidian fetches the base version from GitHub by the blob SHA in the sync index
     And it does a three-way line merge of base, mine and GitHub's
     And the note contains both changes
     And the merged note is pushed as a commit on top of "B2"
@@ -56,7 +56,7 @@ Feature: Handle conflicts without losing anything
 
   Scenario: Conflict copies are easy to find and clean up
     Given a sync produced 2 conflict copies
-    When I run the command "Gitsidian: Show conflicts"
+    When I run the command "BrandonGitsidian: Show conflicts"
     Then I see both conflict copies with the file each belongs to
     And I can open either one, or delete a copy once I've resolved it
 

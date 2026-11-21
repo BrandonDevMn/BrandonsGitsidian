@@ -4,7 +4,7 @@ Feature: When sync runs on iOS
   no real background time, so sync has to happen while the app is open.
 
   Background:
-    Given Gitsidian is connected and has completed its first sync
+    Given BrandonGitsidian is connected and has completed its first sync
 
   Scenario: Sync when Obsidian opens
     Given "Sync on startup" is on
@@ -34,7 +34,7 @@ Feature: When sync runs on iOS
   Scenario: Quick push when leaving the app
     Given I have unsynced edits
     When I switch away from Obsidian
-    Then Gitsidian immediately tries to push only the changed files
+    Then BrandonGitsidian immediately tries to push only the changed files
     And it doesn't start downloads
     But if iOS suspends the app first, the edits are pushed on the next sync instead
 
@@ -44,11 +44,11 @@ Feature: When sync runs on iOS
 
     Examples:
       | action                                  |
-      | tap the Gitsidian ribbon icon           |
-      | run the command "Gitsidian: Sync now"   |
+      | tap the BrandonGitsidian ribbon icon           |
+      | run the command "BrandonGitsidian: Sync now"   |
 
   Scenario: Sync from an iOS Shortcut
-    When an iOS Shortcut opens the URL "obsidian://gitsidian?action=sync"
+    When an iOS Shortcut opens the URL "obsidian://brandon-gitsidian?action=sync"
     Then Obsidian opens and a sync starts
 
   Scenario: Only one sync at a time
@@ -64,6 +64,6 @@ Feature: When sync runs on iOS
     And the sync runs the next time a trigger fires while online
 
   Scenario: Pause syncing
-    When I run the command "Gitsidian: Pause sync"
+    When I run the command "BrandonGitsidian: Pause sync"
     Then no automatic syncs run until I resume
     And "Sync now" still works

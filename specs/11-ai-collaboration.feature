@@ -3,13 +3,13 @@ Feature: Work alongside Claude in the same repository
   These scenarios make that hand-off smooth.
 
   Background:
-    Given Gitsidian syncs "BrandonDevMn/Claudian"
+    Given BrandonGitsidian syncs "BrandonDevMn/Claudian"
     And Claude works on the same repository using git
 
   @mvp
   Scenario: Hand-off before talking to Claude
     Given I edited notes on my phone
-    When I run "Gitsidian: Sync now" before starting a conversation with Claude
+    When I run "BrandonGitsidian: Sync now" before starting a conversation with Claude
     Then my edits are on GitHub
     And Claude sees them when it pulls
 
@@ -22,8 +22,8 @@ Feature: Work alongside Claude in the same repository
 
   @mvp
   Scenario: Commits from the phone are recognisable
-    When Gitsidian pushes a commit
-    Then the commit message starts with "Gitsidian:"
+    When BrandonGitsidian pushes a commit
+    Then the commit message starts with "BrandonGitsidian:"
     And it names the device it came from
     And Claude can tell phone edits from its own in the git log
 
@@ -44,11 +44,11 @@ Feature: Work alongside Claude in the same repository
   @later
   Scenario: Remind me when I'm about to talk to Claude with unsynced edits
     Given I have edits that haven't been pushed
-    When I open the Claude app from an iOS Shortcut that first runs "obsidian://gitsidian?action=sync"
+    When I open the Claude app from an iOS Shortcut that first runs "obsidian://brandon-gitsidian?action=sync"
     Then the sync finishes before the Claude app opens
 
   @later
   Scenario: Quick "what did Claude change?" view
-    When I run the command "Gitsidian: What changed since I last looked"
-    Then I see a list of notes changed by commits not made by Gitsidian
+    When I run the command "BrandonGitsidian: What changed since I last looked"
+    Then I see a list of notes changed by commits not made by BrandonGitsidian
     And each item opens the note with the changed lines highlighted

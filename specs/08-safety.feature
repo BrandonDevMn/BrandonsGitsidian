@@ -3,7 +3,7 @@ Feature: Guard rails against data loss
   A sync tool that loses notes is worse than no sync tool.
 
   Background:
-    Given Gitsidian is connected and has completed its first sync
+    Given BrandonGitsidian is connected and has completed its first sync
 
   Scenario: Never force-push
     When any push runs
@@ -47,6 +47,6 @@ Feature: Guard rails against data loss
     And if saving fails, the previous base and index are still intact
 
   Scenario: Dry run shows what would happen
-    When I run the command "Gitsidian: Preview sync"
+    When I run the command "BrandonGitsidian: Preview sync"
     Then I see lists of files to pull, push, delete and conflicts
     And nothing is changed in the vault or on GitHub

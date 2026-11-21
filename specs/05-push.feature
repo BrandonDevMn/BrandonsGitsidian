@@ -20,7 +20,7 @@ Feature: Push vault changes to GitHub
   Scenario: The commit message says what changed and where
     Given I edited 2 notes and added 1 on a device named "Brandon's iPhone"
     When sync runs
-    Then the commit message's first line is "Gitsidian: 3 notes from Brandon's iPhone"
+    Then the commit message's first line is "BrandonGitsidian: 3 notes from Brandon's iPhone"
     And the message body lists each path with "updated", "added" or "deleted"
 
   Scenario: Deletions are pushed as tree entries with no blob
@@ -40,9 +40,9 @@ Feature: Push vault changes to GitHub
   Scenario: Someone pushed in the meantime
     Given I edited "games/overseers-of-oakhaven/quests.md"
     And while my push was being built, Claude pushed "B2" to "main"
-    When Gitsidian tries to move "main" to its new commit
+    When BrandonGitsidian tries to move "main" to its new commit
     Then GitHub rejects the update because it isn't a fast-forward
-    And Gitsidian does not force the update
+    And BrandonGitsidian does not force the update
     And it pulls "B2", reclassifies changes, and rebuilds the commit on top of "B2"
     And it retries at most 3 times before reporting "GitHub kept changing. Try again in a minute."
 
@@ -50,7 +50,7 @@ Feature: Push vault changes to GitHub
     Given I added "games/overseers-of-oakhaven/players/chibi-sheet.jpeg"
     When sync runs
     Then its blob is created with encoding "base64"
-    And the blob SHA GitHub returns equals the SHA Gitsidian computed locally
+    And the blob SHA GitHub returns equals the SHA BrandonGitsidian computed locally
 
   Scenario: Nothing to push means no commit
     Given there are no local changes

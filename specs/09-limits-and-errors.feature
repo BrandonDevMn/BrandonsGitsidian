@@ -4,7 +4,7 @@ Feature: Limits and errors
   has trouble with very large bodies.
 
   Background:
-    Given Gitsidian is connected and has completed its first sync
+    Given BrandonGitsidian is connected and has completed its first sync
 
   @ios
   Scenario: Very large files are skipped with a warning
@@ -19,14 +19,14 @@ Feature: Limits and errors
     Given GitHub reports 40 requests remaining this hour
     And the sync needs 120 requests
     When sync runs
-    Then Gitsidian syncs as many whole files as it safely can
+    Then BrandonGitsidian syncs as many whole files as it safely can
     And stops before the limit, keeping the sync resumable
     And I see when the limit resets
 
   Scenario: Secondary rate limit
     Given GitHub responds with HTTP 403 or 429 and a "retry-after" header of 60 seconds
     When sync is uploading blobs
-    Then Gitsidian waits 60 seconds before the next request
+    Then BrandonGitsidian waits 60 seconds before the next request
     And it never sends more than 60 blob uploads per minute
 
   Scenario: Going offline mid-sync
@@ -39,13 +39,13 @@ Feature: Limits and errors
     Given the token has expired
     When sync runs
     Then sync stops before changing anything
-    And I see "GitHub token expired. Update it in Gitsidian settings."
+    And I see "GitHub token expired. Update it in BrandonGitsidian settings."
     And automatic syncs pause until the token is fixed
 
   Scenario: Branch was deleted or rewritten on GitHub
     Given the base commit "B1" is no longer an ancestor of the remote head
     When sync runs
-    Then Gitsidian doesn't pull or push automatically
+    Then BrandonGitsidian doesn't pull or push automatically
     And I see "GitHub's history changed. Choose how to re-sync." with the first-sync choices
 
   Scenario: Paths GitHub or iOS can't store

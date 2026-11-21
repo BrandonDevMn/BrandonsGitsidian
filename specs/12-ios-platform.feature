@@ -3,6 +3,11 @@ Feature: iOS platform rules
   Rules the implementation must follow so the plugin loads and runs on Obsidian for iOS.
   These are checked by build-time linting and by running the plugin on an iPhone.
 
+  Scenario: The manifest identifies a personal plugin
+    Then manifest.json has "id" set to "brandon-gitsidian"
+    And "name" set to "BrandonGitsidian"
+    And the description says it's a personal plugin for Brandon's vault
+
   Scenario: The plugin can be installed on mobile
     Then manifest.json has "isDesktopOnly" set to false
     And "minAppVersion" is at least "1.11.4" so SecretStorage is available

@@ -1,15 +1,15 @@
 @mvp
 Feature: Connect a vault to a GitHub repository
   As Brandon on his iPhone
-  I want to point Gitsidian at one GitHub repo with a token
+  I want to point BrandonGitsidian at one GitHub repo with a token
   So that my vault can sync with the repo Claude edits
 
   Background:
     Given Obsidian for iOS is running a vault named "Claudian"
-    And the Gitsidian plugin is enabled
+    And the BrandonGitsidian plugin is enabled
 
   Scenario: Settings ask only for what's needed
-    When I open the Gitsidian settings tab
+    When I open the BrandonGitsidian settings tab
     Then I see fields for repository owner, repository name and branch
     And I see a token picker backed by Obsidian's SecretStorage
     And the branch defaults to "main"
@@ -54,7 +54,7 @@ Feature: Connect a vault to a GitHub repository
     And the steps suggest an expiry date
 
   Scenario: Default exclusions are shown and editable
-    When I open the Gitsidian settings tab
+    When I open the BrandonGitsidian settings tab
     Then the excluded paths list contains ".obsidian/", ".trash/" and ".git/"
     And I can add patterns such as "*.tmp" or "private/**"
     And excluded files are never uploaded, downloaded or deleted by sync

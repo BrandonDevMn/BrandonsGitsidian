@@ -1,6 +1,8 @@
-# Gitsidian
+# BrandonGitsidian
 
 An iPhone-first Obsidian plugin that syncs a vault with a GitHub repository, so a person and an AI assistant (Claude) can work on the same notes.
+
+> **Personal plugin.** Built for Brandon's own vault and workflow, not for general use. It won't be submitted to the Obsidian community directory, and there's no support for other setups. Plugin ID: `brandon-gitsidian`.
 
 > Status: **design phase**. There is no code yet. Behaviour is being specified first, as Gherkin feature files in [`specs/`](specs/).
 
@@ -12,7 +14,7 @@ The workflow this plugin serves:
 2. Claude edits Markdown notes in a GitHub repo (`BrandonDevMn/Claudian`) using real git.
 3. Brandon reads and edits the same notes in Obsidian on his iPhone.
 
-There is no other computer in the loop. The existing git plugins are either desktop-first (Obsidian Git's mobile mode is documented as unstable) or young and loosely specified. Gitsidian aims to be small, predictable, and safe on iOS, and to be explicit about the case where two editors (human and AI) change the same note.
+There is no other computer in the loop. The existing git plugins are either desktop-first (Obsidian Git's mobile mode is documented as unstable) or young and loosely specified. BrandonGitsidian aims to be small, predictable, and safe on iOS, and to be explicit about the case where two editors (human and AI) change the same note.
 
 ## Design principles
 

@@ -4,12 +4,12 @@ Feature: Show what sync is doing and what it did
   somewhere visible on a small screen.
 
   Background:
-    Given Gitsidian is connected and has completed its first sync
+    Given BrandonGitsidian is connected and has completed its first sync
 
   @ios
   Scenario Outline: The ribbon icon shows the sync state
     Given sync is <state>
-    Then the Gitsidian ribbon icon shows <icon>
+    Then the BrandonGitsidian ribbon icon shows <icon>
 
     Examples:
       | state                     | icon                       |
@@ -29,7 +29,7 @@ Feature: Show what sync is doing and what it did
     And tapping the notice opens the sync log
 
   Scenario: The sync log
-    When I run the command "Gitsidian: Open sync log"
+    When I run the command "BrandonGitsidian: Open sync log"
     Then I see the last 50 syncs, newest first
     And each entry shows the time, the trigger, files pulled, pushed and conflicted, and any errors
     And each changed path can be tapped to open the note
@@ -41,7 +41,7 @@ Feature: Show what sync is doing and what it did
     And the files each commit changed
 
   Scenario: Settings show the current state
-    When I open the Gitsidian settings tab
+    When I open the BrandonGitsidian settings tab
     Then I see the last successful sync time
     And the short SHA of the base commit with a link to it on GitHub
     And the number of tracked files

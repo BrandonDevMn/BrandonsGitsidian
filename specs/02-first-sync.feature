@@ -4,7 +4,7 @@ Feature: First sync
   so it has to decide how a vault and a repo come together without losing anything.
 
   Background:
-    Given Gitsidian is connected to "BrandonDevMn/Claudian" on branch "main"
+    Given BrandonGitsidian is connected to "BrandonDevMn/Claudian" on branch "main"
     And no base commit is stored yet
 
   Scenario: Empty vault, repo has notes (fresh phone)
@@ -22,7 +22,7 @@ Feature: First sync
     When the first sync runs
     Then the repository is initialised with one file through the contents API
     And the remaining notes are pushed as a single commit on top of it
-    And the commit message is "Gitsidian: initial upload from iPhone"
+    And the commit message is "BrandonGitsidian: initial upload from iPhone"
     And the base commit is set to the new head
 
   @safety

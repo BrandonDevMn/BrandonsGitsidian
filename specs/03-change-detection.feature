@@ -38,7 +38,7 @@ Feature: Work out what changed since the last sync
 
   Scenario: Blob SHAs are computed the same way git does
     Given a local file whose bytes are "hello\n"
-    When Gitsidian computes its blob SHA
+    When BrandonGitsidian computes its blob SHA
     Then the SHA is "ce013625030ba8dba906f756967f9e9ca394464a"
 
   Scenario: Unchanged files aren't re-hashed every sync
