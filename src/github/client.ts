@@ -152,6 +152,25 @@ export class GitHubClient {
     return { canPush: !!r.permissions?.push, defaultBranch: r.default_branch, isPrivate: r.private };
   }
 
+  /** Repositories the token can push to (for the settings picker), most recently pushed first. */
+  async listRepos(): Promise<{ owner: string; repo: string; defaultBranch: string; isPrivate: boolean }[]> {
+    const out: { owner: string; repo: string; defaultBranch: string; isPrivate: boolean }[] = [];
+    for (let page = 1; page <= 10; page++) {
+      const batch = await this.callWithRetry<{ full_name: string; default_branch: string; private: boolean; permissions?: { push?: boolean } }[]>(
+        "GET",
+        `/user/repos?per_page=100&sort=pushed&page=${page}`,
+      );
+      for (const r of batch) {
+        if (!r.permissions?.push) continue;
+        const [owner = "", repo = ""] = r.full_name.split("/");
+        out.push({ owner, repo, defaultBranch: r.default_branch, isPrivate: r.private });
+      }
+      if (batch.length < 100) break;
+    }
+    this.o.log.info(`Found ${out.length} repositories this token can push to`);
+    return out;
+  }
+
   /** Head commit SHA of a branch, null if the branch doesn't exist, "empty" if the repo has no commits. */
   async branchHead(branch: string): Promise<string | null | "empty"> {
     try {

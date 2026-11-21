@@ -79,6 +79,15 @@ export class FakeGitHub {
     const url = new URL(req.url);
     const base = `/repos/${this.owner}/${this.repo}`;
     const path = decodeURIComponent(url.pathname);
+    if (path === "/user/repos" && req.method === "GET") {
+      const page = Number(url.searchParams.get("page") ?? "1");
+      const all = [
+        { full_name: `${this.owner}/${this.repo}`, default_branch: "main", private: true, permissions: { push: this.canPush } },
+        { full_name: `${this.owner}/BrandonsGitsidian`, default_branch: "main", private: false, permissions: { push: true } },
+        { full_name: "someone/read-only", default_branch: "trunk", private: false, permissions: { push: false } },
+      ];
+      return res(200, page === 1 ? all : [], this.rateRemaining);
+    }
     if (!path.startsWith(base)) return res(404, { message: "Not Found" });
     const rest = path.slice(base.length);
     const body = req.body ? JSON.parse(req.body) : undefined;

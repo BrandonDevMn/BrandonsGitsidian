@@ -96,3 +96,15 @@ describe("GitHub client", () => {
     expect(slept).toEqual([1000]);
   });
 });
+
+describe("01 picking a repository", () => {
+  it("lists the repositories the token can push to, with their default branch", async () => {
+    const gh = new FakeGitHub();
+    const client = new GitHubClient({ owner: "", repo: "", token: "good-token", http: gh.http, log: new Logger(), sleep: async () => {} });
+    const repos = await client.listRepos();
+    expect(repos).toEqual([
+      { owner: "BrandonDevMn", repo: "Claudian", defaultBranch: "main", isPrivate: true },
+      { owner: "BrandonDevMn", repo: "BrandonsGitsidian", defaultBranch: "main", isPrivate: false },
+    ]);
+  });
+});
