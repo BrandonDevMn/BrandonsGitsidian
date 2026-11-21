@@ -18,6 +18,7 @@ Gherkin feature files that define how BrandonGitsidian behaves. They are the sou
 | [`10-status-and-history.feature`](10-status-and-history.feature) | Telling the user what happened |
 | [`11-ai-collaboration.feature`](11-ai-collaboration.feature) | Working alongside Claude editing the same repo |
 | [`12-ios-platform.feature`](12-ios-platform.feature) | Platform rules the code must follow on iOS |
+| [`13-detailed-log.feature`](13-detailed-log.feature) | The full technical log: what's logged, levels, viewing, keeping, sharing, privacy |
 
 Background research and sources: [`research.md`](research.md).
 
