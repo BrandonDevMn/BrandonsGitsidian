@@ -1,0 +1,10 @@
+{
+  "id": "brandon-gitsidian",
+  "name": "BrandonGitsidian",
+  "version": "0.1.0",
+  "minAppVersion": "1.11.4",
+  "description": "Personal plugin for Brandon's vault: syncs with a GitHub repo from iPhone.",
+  "author": "BrandonDevMn",
+  "authorUrl": "https://github.com/BrandonDevMn",
+  "isDesktopOnly": false
+}
